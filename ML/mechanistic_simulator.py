@@ -8,6 +8,26 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.optimize import root_scalar
 from typing import Dict, Tuple, Optional, Union
+import json
+import os
+
+# Debug logging
+LOG_PATH = r"c:\Users\vt4ho\Simulations\Urease_2\.cursor\debug.log"
+def debug_log(location, message, data, hypothesis_id="A"):
+    try:
+        with open(LOG_PATH, 'a', encoding='utf-8') as f:
+            log_entry = {
+                "sessionId": "debug-session",
+                "runId": "run1",
+                "hypothesisId": hypothesis_id,
+                "location": location,
+                "message": message,
+                "data": data,
+                "timestamp": int(__import__('time').time() * 1000)
+            }
+            f.write(json.dumps(log_entry) + '\n')
+    except:
+        pass
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║                  CONSTANTS & PARAMETERS                      ║
@@ -243,6 +263,18 @@ class UreaseSimulator:
             # Active enzyme (g/L)
             E_active = E0_g_per_L * math.exp(-max(k_deact_per_s, 0.0) * max(t, 0.0))
             r_NH3 = per_g * E_active  # mol/L/s produced
+            
+            # #region agent log
+            if t == 0.0 or (t > 0 and t % 100.0 < 0.1):  # Log at start and periodically
+                debug_log("mechanistic_simulator.py:245", "Enzyme activity", {
+                    "t": float(t),
+                    "k_deact_per_s": float(k_deact_per_s),
+                    "E0": float(E0_g_per_L),
+                    "E_active": float(E_active),
+                    "E_active_frac": float(E_active / E0_g_per_L) if E0_g_per_L > 0 else 0.0,
+                    "r_NH3": float(r_NH3)
+                }, "F")
+            # #endregion
             # Gas loss (mol/L/s)
             r_strp_NH3 = (kLa_NH3_s * sp['NH3']) if use_strip_NH3 else 0.0
             dS_dt = -0.5 * r_NH3
@@ -296,6 +328,15 @@ class UreaseSimulator:
         tau_probe = params.get('tau_probe', 0.0)
         kLa_NH3 = params.get('kLa_NH3', 0.0)
         use_strip = (kLa_NH3 > 0.0)
+        
+        # #region agent log
+        debug_log("mechanistic_simulator.py:295", "k_deact extracted", {
+            "k_deact": float(k_deact),
+            "k_deact_used": float(max(k_deact, 0.0)),
+            "E0": float(E0),
+            "t_max": float(t_grid[-1]) if len(t_grid) > 0 else 0.0
+        }, "E")
+        # #endregion
         
         # Apply time shift
         t_model = np.clip(t_grid - t_shift, 0.0, None)
