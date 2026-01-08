@@ -355,18 +355,121 @@ def main():
     t_grid = np.linspace(0.0, t_max, n_times)
     
     # Generate trajectories using the same worker function
-    from generate_early_inference_data import _worker_generate_single_trajectory
+    # Import explicitly to avoid conflicts with DeepONet version
+    import generate_early_inference_data as gen_data
+    import inspect
+    import time
+    # Note: json is already imported at the top of the file
+    _worker_generate_single_trajectory = gen_data._worker_generate_single_trajectory
+    
+    # #region agent log
+    log_path = r"c:\Users\vt4ho\Simulations\Urease_2\.cursor\debug.log"
+    with open(log_path, 'a', encoding='utf-8') as f:
+        sig = inspect.signature(_worker_generate_single_trajectory)
+        log_entry = {
+            "sessionId": "debug-session",
+            "runId": "run2",
+            "hypothesisId": "B",
+            "location": "evaluate_early_inference.py:365",
+            "message": "Imported worker function",
+            "data": {
+                "function_module": _worker_generate_single_trajectory.__module__,
+                "function_file": inspect.getfile(_worker_generate_single_trajectory),
+                "function_signature": str(sig)
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+        f.write(json.dumps(log_entry) + '\n')
+    # #endregion
     
     test_results = []
     for i in tqdm(range(n_test_samples), desc="Generating test trajectories"):
         params_row = {k: v[i] for k, v in test_params_dict.items()}
         try:
-            _, result, _ = _worker_generate_single_trajectory(
-                (i, params_row, t_grid, (), ())
-            )
+            # #region agent log
+            log_path = r"c:\Users\vt4ho\Simulations\Urease_2\.cursor\debug.log"
+            with open(log_path, 'a', encoding='utf-8') as f:
+                log_entry = {
+                    "sessionId": "debug-session",
+                    "runId": "run2",
+                    "hypothesisId": "A",
+                    "location": "evaluate_early_inference.py:364",
+                    "message": "Before calling _worker_generate_single_trajectory",
+                    "data": {
+                        "i": i,
+                        "args_tuple": [i, "params_row", "t_grid", "()"],
+                        "args_tuple_len": 4
+                    },
+                    "timestamp": int(time.time() * 1000)
+                }
+                f.write(json.dumps(log_entry) + '\n')
+            # #endregion
+            # Call with exactly 4 elements: (index, params_dict, t_grid, constants)
+            # This matches the function signature: index, params_dict, t_grid, constants = args_tuple
+            result_tuple = _worker_generate_single_trajectory((i, params_row, t_grid, ()))
+            
+            # #region agent log
+            with open(log_path, 'a', encoding='utf-8') as f:
+                log_entry = {
+                    "sessionId": "debug-session",
+                    "runId": "run2",
+                    "hypothesisId": "A",
+                    "location": "evaluate_early_inference.py:390",
+                    "message": "After calling _worker_generate_single_trajectory",
+                    "data": {
+                        "i": i,
+                        "result_tuple_type": type(result_tuple).__name__,
+                        "result_tuple_len": len(result_tuple) if hasattr(result_tuple, '__len__') else "N/A",
+                        "result_tuple": str(result_tuple)[:200] if result_tuple else None
+                    },
+                    "timestamp": int(time.time() * 1000)
+                }
+                f.write(json.dumps(log_entry) + '\n')
+            # #endregion
+            
+            # Verify result_tuple has exactly 3 elements
+            if not hasattr(result_tuple, '__len__') or len(result_tuple) != 3:
+                raise ValueError(f"result_tuple has {len(result_tuple) if hasattr(result_tuple, '__len__') else 'unknown'} elements, expected 3: {result_tuple}")
+            
+            _, result, _ = result_tuple
+            # #region agent log
+            with open(log_path, 'a', encoding='utf-8') as f:
+                log_entry = {
+                    "sessionId": "debug-session",
+                    "runId": "run2",
+                    "hypothesisId": "A",
+                    "location": "evaluate_early_inference.py:395",
+                    "message": "Successfully unpacked result",
+                    "data": {
+                        "i": i,
+                        "result_is_none": result is None,
+                        "result_keys": list(result.keys()) if result is not None else None
+                    },
+                    "timestamp": int(time.time() * 1000)
+                }
+                f.write(json.dumps(log_entry) + '\n')
+            # #endregion
             if result is not None:
                 test_results.append((params_row, result))
         except Exception as e:
+            # #region agent log
+            with open(log_path, 'a', encoding='utf-8') as f:
+                log_entry = {
+                    "sessionId": "debug-session",
+                    "runId": "run2",
+                    "hypothesisId": "A",
+                    "location": "evaluate_early_inference.py:410",
+                    "message": "Exception caught",
+                    "data": {
+                        "i": i,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "error_args": str(e.args) if hasattr(e, 'args') else None
+                    },
+                    "timestamp": int(time.time() * 1000)
+                }
+                f.write(json.dumps(log_entry) + '\n')
+            # #endregion
             print(f"Warning: Failed to generate trajectory {i}: {e}")
             continue
     
