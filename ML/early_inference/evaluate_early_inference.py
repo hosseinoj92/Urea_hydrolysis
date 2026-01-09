@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from scipy.stats import pearsonr
 
-from forecast_early_inference import load_early_inference_model, normalize_inputs, denormalize_outputs
+from forecast_early_inference import load_early_inference_model, normalize_inputs, denormalize_outputs, apply_measurement_model
 from fit_mechanistic import fit_mechanistic_parameters
 from mechanistic_simulator import UreaseSimulator
 
@@ -177,24 +177,36 @@ def evaluate_single_case(
         # Time points for forecast (from prefix end to horizon)
         t_forecast = np.linspace(prefix_length, prefix_length + horizon, int(horizon / 2))
         
-        # ML forecast
+        # ML forecast - simulate true pH then apply measurement model
         sim_params_ml = {
             'a': ml_params.get('activity_scale', 1.0),
             'k_d': ml_params.get('k_d', 0.0),
             't_shift': 0.0,
-            'tau_probe': ml_params.get('tau_probe', 0.0),
+            'tau_probe': 0.0,  # Don't apply in simulator
         }
-        pH_ml = sim.simulate_forward(sim_params_ml, t_forecast, return_totals=False, apply_probe_lag=False)
+        pH_ml_true = sim.simulate_forward(sim_params_ml, t_forecast, return_totals=False, apply_probe_lag=False)
+        # Apply measurement model to predict sensor readings
+        pH_ml = apply_measurement_model(
+            pH_ml_true, t_forecast,
+            tau_probe=ml_params.get('tau_probe', 0.0),
+            pH_offset=ml_params.get('pH_offset', 0.0)
+        )
         ml_forecasts[horizon] = {'t': t_forecast, 'pH': pH_ml}
         
-        # Fit forecast
+        # Fit forecast - simulate true pH then apply measurement model
         sim_params_fit = {
             'a': fit_params.get('activity_scale', 1.0),
             'k_d': fit_params.get('k_d', 0.0),
             't_shift': 0.0,
-            'tau_probe': fit_params.get('tau_probe', 0.0),
+            'tau_probe': 0.0,  # Don't apply in simulator
         }
-        pH_fit = sim.simulate_forward(sim_params_fit, t_forecast, return_totals=False, apply_probe_lag=False)
+        pH_fit_true = sim.simulate_forward(sim_params_fit, t_forecast, return_totals=False, apply_probe_lag=False)
+        # Apply measurement model to predict sensor readings
+        pH_fit = apply_measurement_model(
+            pH_fit_true, t_forecast,
+            tau_probe=fit_params.get('tau_probe', 0.0),
+            pH_offset=fit_params.get('pH_offset', 0.0)
+        )
         fit_forecasts[horizon] = {'t': t_forecast, 'pH': pH_fit}
     
     # Extract true future trajectory

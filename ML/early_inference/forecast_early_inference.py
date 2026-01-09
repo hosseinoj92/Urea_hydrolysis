@@ -10,6 +10,7 @@ from typing import Dict, Tuple, Optional
 
 from early_inference_model import create_early_inference_model
 from mechanistic_simulator import UreaseSimulator
+import math
 
 
 def load_early_inference_model(model_path: Path, device: torch.device):
@@ -102,6 +103,37 @@ def denormalize_outputs(params_norm: np.ndarray, normalization_stats: dict) -> n
     return params
 
 
+def apply_measurement_model(pH_true: np.ndarray, t_grid: np.ndarray, 
+                           tau_probe: float, pH_offset: float) -> np.ndarray:
+    """
+    Apply measurement model to true pH trajectory (probe lag + offset).
+    
+    Parameters
+    ----------
+    pH_true: (n_times,) array of true pH values
+    t_grid: (n_times,) array of time points
+    tau_probe: probe time constant [s]
+    pH_offset: pH measurement offset
+    
+    Returns
+    -------
+    pH_meas: (n_times,) array of measured pH values (no noise added)
+    """
+    pH_meas = pH_true.copy()
+    
+    # Apply probe lag (first-order filter)
+    if tau_probe > 0.0:
+        for i in range(1, len(t_grid)):
+            dt = t_grid[i] - t_grid[i-1]
+            a = math.exp(-dt / max(tau_probe, 1e-12))
+            pH_meas[i] = a * pH_meas[i-1] + (1 - a) * pH_true[i]
+    
+    # Apply offset
+    pH_meas = pH_meas + pH_offset
+    
+    return pH_meas
+
+
 def forecast_ph(
     pH_prefix: np.ndarray,
     t_prefix: np.ndarray,
@@ -191,10 +223,18 @@ def forecast_ph(
         'a': estimated_params.get('activity_scale', 1.0),
         'k_d': estimated_params.get('k_d', 0.0),
         't_shift': 0.0,
-        'tau_probe': estimated_params.get('tau_probe', 0.0),
+        'tau_probe': 0.0,  # Don't apply in simulator, apply separately
     }
     
-    # Simulate forward
-    pH_forecast = sim.simulate_forward(sim_params, t_forecast, return_totals=False, apply_probe_lag=False)
+    # Simulate forward to get true pH
+    pH_true = sim.simulate_forward(sim_params, t_forecast, return_totals=False, apply_probe_lag=False)
+    
+    # Apply measurement model to match training distribution
+    # This predicts what the sensor will actually read
+    pH_forecast = apply_measurement_model(
+        pH_true, t_forecast,
+        tau_probe=estimated_params.get('tau_probe', 0.0),
+        pH_offset=estimated_params.get('pH_offset', 0.0)
+    )
     
     return pH_forecast, estimated_params

@@ -3,9 +3,41 @@ Mechanistic parameter fitting using least squares optimization.
 """
 
 import numpy as np
+import math
 from scipy.optimize import least_squares
 from typing import Dict, Tuple, Optional
 from mechanistic_simulator import UreaseSimulator
+
+
+def apply_measurement_model(pH_true: np.ndarray, t_grid: np.ndarray, 
+                           tau_probe: float, pH_offset: float) -> np.ndarray:
+    """
+    Apply measurement model to true pH trajectory (probe lag + offset).
+    
+    Parameters
+    ----------
+    pH_true: (n_times,) array of true pH values
+    t_grid: (n_times,) array of time points
+    tau_probe: probe time constant [s]
+    pH_offset: pH measurement offset
+    
+    Returns
+    -------
+    pH_meas: (n_times,) array of measured pH values (no noise added)
+    """
+    pH_meas = pH_true.copy()
+    
+    # Apply probe lag (first-order filter)
+    if tau_probe > 0.0:
+        for i in range(1, len(t_grid)):
+            dt = t_grid[i] - t_grid[i-1]
+            a = math.exp(-dt / max(tau_probe, 1e-12))
+            pH_meas[i] = a * pH_meas[i-1] + (1 - a) * pH_true[i]
+    
+    # Apply offset
+    pH_meas = pH_meas + pH_offset
+    
+    return pH_meas
 
 
 def fit_mechanistic_parameters(
@@ -75,22 +107,25 @@ def fit_mechanistic_parameters(
         # Convert vector to dict
         params_dict = {name: params_vec[i] for i, name in enumerate(param_names)}
         
-        # Simulate
+        # Simulate true pH (no measurement effects)
         sim_params = {
             'a': params_dict.get('activity_scale', 1.0),
             'k_d': params_dict.get('k_d', 0.0),
             't_shift': 0.0,
-            'tau_probe': params_dict.get('tau_probe', 0.0),
+            'tau_probe': 0.0,  # Don't apply in simulator
         }
         
         try:
-            pH_sim = sim.simulate_forward(sim_params, t_measured, return_totals=False, apply_probe_lag=False)
+            pH_true = sim.simulate_forward(sim_params, t_measured, return_totals=False, apply_probe_lag=False)
             
-            # Apply offset if fitting
-            if 'pH_offset' in params_dict:
-                pH_sim = pH_sim + params_dict['pH_offset']
+            # Apply measurement model (probe lag + offset)
+            pH_sim = apply_measurement_model(
+                pH_true, t_measured,
+                tau_probe=params_dict.get('tau_probe', 0.0),
+                pH_offset=params_dict.get('pH_offset', 0.0)
+            )
             
-            # Compute residual
+            # Compute residual (simulated sensor reading vs actual sensor reading)
             res = pH_sim - pH_measured
             return res
         except:

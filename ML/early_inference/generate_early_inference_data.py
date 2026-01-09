@@ -24,15 +24,15 @@ from mechanistic_simulator import UreaseSimulator
 # ╚══════════════════════════════════════════════════════════════╝
 CONFIG = {
     # Dataset generation parameters
-    "n_samples": 20000,           # Number of full trajectories to generate
+    "n_samples": 50000,           # Number of full trajectories to generate
     "t_max": 2000.0,              # Maximum time [s] for full trajectories
     "n_times": 2000,              # Number of time points in full trajectory
     "seed": 42,                    # Random seed for reproducibility
     "output_dir": "Generated_Data_EarlyInference_20000",  # Output directory
     
     # Prefix extraction (multiple prefix lengths for training)
-    "prefix_lengths": [10.0, 30.0, 60.0, 120.0],  # Prefix lengths in seconds [s]
-    "prefix_n_points": 50,        # Number of points to extract from each prefix (uniform sampling)
+    "prefix_lengths": [10.0, 30.0, 60.0],  # Prefix lengths in seconds [s]
+    "prefix_n_points": 100,        # Number of points to extract from each prefix (uniform sampling)
     
     # Parameters to infer (latent kinetic/deactivation parameters)
     "infer_params": [
@@ -150,7 +150,10 @@ def apply_measurement_model(pH_true: np.ndarray, t_grid: np.ndarray,
 def extract_prefix(pH_meas: np.ndarray, t_grid: np.ndarray, 
                    prefix_length: float, n_points: int) -> tuple:
     """
-    Extract prefix of specified length from measured pH trajectory.
+    Extract prefix of specified length from measured pH trajectory with adaptive sampling.
+    
+    Sampling strategy: Dense at beginning (high pH change rate), sparse at end (plateaus).
+    Uses exponential spacing to allocate more points where information content is highest.
     
     Parameters
     ----------
@@ -174,12 +177,28 @@ def extract_prefix(pH_meas: np.ndarray, t_grid: np.ndarray,
         t_prefix_full = t_grid[mask]
         pH_prefix_full = pH_meas[mask]
         
-        # Sample n_points uniformly from prefix
+        # Sample n_points with adaptive density
         if len(t_prefix_full) <= n_points:
             t_prefix = t_prefix_full
             pH_prefix = pH_prefix_full
         else:
-            indices = np.linspace(0, len(t_prefix_full) - 1, n_points, dtype=int)
+            # Adaptive sampling: more points early, fewer late
+            # Exponential spacing: u^alpha maps [0,1] → [0,1] with concentration at 0
+            alpha = 2.0  # Tuning parameter (higher = more aggressive front-loading)
+            u = np.linspace(0, 1, n_points) ** alpha
+            indices = (u * (len(t_prefix_full) - 1)).astype(int)
+            
+            # Ensure unique indices (in case of rounding)
+            indices = np.unique(indices)
+            
+            # If we lost points due to uniqueness, pad with uniform samples
+            if len(indices) < n_points:
+                remaining = n_points - len(indices)
+                all_indices = np.arange(len(t_prefix_full))
+                available = np.setdiff1d(all_indices, indices)
+                extra = np.random.choice(available, remaining, replace=False)
+                indices = np.sort(np.concatenate([indices, extra]))
+            
             t_prefix = t_prefix_full[indices]
             pH_prefix = pH_prefix_full[indices]
     
@@ -392,11 +411,14 @@ def main():
     print("="*60)
     
     # For each prefix length, create training examples
+    # Note: t_prefix is saved and available for future model improvements
+    # Current model uses zeros (backward compatible), but architecture can be
+    # extended to use time as additional input feature
     training_data = {}
     for prefix_length in CONFIG["prefix_lengths"]:
         training_data[prefix_length] = {
             "pH_prefix": [],
-            "t_prefix": [],
+            "t_prefix": [],  # Actual time arrays (with adaptive sampling)
             "known_inputs": [],
             "target_params": [],
         }

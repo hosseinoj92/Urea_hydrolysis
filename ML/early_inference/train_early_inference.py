@@ -21,14 +21,14 @@ CONFIG = {
     # Data paths
     "data_dir": "Generated_Data_EarlyInference_20000",
     "output_dir": "models_early_inference",
-    "prefix_length": 30.0,  # Which prefix length to train on (10, 30, or 60 seconds)
+    "prefix_length": 60.0,  # Which prefix length to train on (10, 30, or 60 seconds)
     
     # Training hyperparameters
     "batch_size": 128,
-    "epochs": 50,
+    "epochs": 100,
     "lr": 1e-3,
     "val_split": 0.2,
-    "early_stopping_patience": 10,
+    "early_stopping_patience": 20,
     
     # Model architecture
     "tcn_channels": [64, 128, 256],
@@ -267,15 +267,20 @@ def main():
     
     print(f"Train: {len(train_indices)} samples, Val: {len(val_indices)} samples")
     
+    # Extract time arrays from data (for future use - currently using zeros for backward compatibility)
+    # Note: To use actual time as features, load t_prefix from dataset and pass here
+    train_t = np.zeros_like(train_pH)  # TODO: Replace with actual t_prefix when ready
+    val_t = np.zeros_like(val_pH)      # TODO: Replace with actual t_prefix when ready
+    
     # Create datasets
     train_dataset = EarlyInferenceDataset(
-        train_pH, np.zeros_like(train_pH), train_known, train_targets,
+        train_pH, train_t, train_known, train_targets,
         normalize_inputs=CONFIG["normalize_inputs"],
         normalize_outputs=CONFIG["normalize_outputs"],
     )
     
     val_dataset = EarlyInferenceDataset(
-        val_pH, np.zeros_like(val_pH), val_known, val_targets,
+        val_pH, val_t, val_known, val_targets,
         normalize_inputs=CONFIG["normalize_inputs"],
         normalize_outputs=CONFIG["normalize_outputs"],
         input_stats={
@@ -316,7 +321,7 @@ def main():
     # Loss and optimizer
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=CONFIG["lr"])
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     
     # Training loop
     output_dir = Path(CONFIG["output_dir"])
@@ -349,7 +354,14 @@ def main():
         train_losses.append(train_loss)
         val_losses.append(val_loss)
         
+        # Track learning rate before scheduler step
+        old_lr = optimizer.param_groups[0]['lr']
         scheduler.step(val_loss)
+        new_lr = optimizer.param_groups[0]['lr']
+        
+        # Print message if learning rate changed
+        if old_lr != new_lr:
+            epoch_pbar.write(f"  → Learning rate reduced: {old_lr:.2e} → {new_lr:.2e}")
         
         best_val_str = f'{best_val_loss:.6f}' if best_val_loss != float('inf') else 'N/A'
         epoch_pbar.set_postfix({

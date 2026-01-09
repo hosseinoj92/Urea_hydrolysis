@@ -1,5 +1,5 @@
 {
-  "n_samples": 20000,
+  "n_samples": 50000,
   "t_max": 2000.0,
   "n_times": 2000,
   "t_grid": [
@@ -2007,10 +2007,9 @@
   "prefix_lengths": [
     10.0,
     30.0,
-    60.0,
-    120.0
+    60.0
   ],
-  "prefix_n_points": 50,
+  "prefix_n_points": 100,
   "infer_params": [
     "activity_scale",
     "k_d",
