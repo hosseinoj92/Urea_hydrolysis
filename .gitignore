@@ -6,3 +6,8 @@
 # Large ML artifacts (recommended out of normal Git)
 *.npz
 *.pt
+.DS_Store
+**/.cursor/
+*.log
+*.npz
+*.pt
