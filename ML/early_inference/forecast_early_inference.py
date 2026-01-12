@@ -10,19 +10,18 @@ from typing import Dict, Tuple, Optional
 
 from early_inference_model import create_early_inference_model
 from mechanistic_simulator import UreaseSimulator
-import math
 
 
 def load_early_inference_model(model_path: Path, device: torch.device):
     """Load trained early inference model."""
-    checkpoint = torch.load(model_path, map_location=device)
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     config = checkpoint.get('config', {})
     metadata = checkpoint.get('metadata', {})
     normalization_stats = checkpoint.get('normalization_stats', {})
     prefix_length = checkpoint.get('prefix_length', 30.0)
     
-    # Reconstruct model
-    infer_params = metadata.get('infer_params', ['activity_scale', 'k_d', 'tau_probe', 'pH_offset'])
+    # Reconstruct model (unified: E0_g_per_L and k_d only)
+    infer_params = metadata.get('infer_params', ['E0_g_per_L', 'k_d'])
     n_output_params = len(infer_params)
     n_known_inputs = len(metadata.get('known_input_names', []))
     
@@ -103,37 +102,6 @@ def denormalize_outputs(params_norm: np.ndarray, normalization_stats: dict) -> n
     return params
 
 
-def apply_measurement_model(pH_true: np.ndarray, t_grid: np.ndarray, 
-                           tau_probe: float, pH_offset: float) -> np.ndarray:
-    """
-    Apply measurement model to true pH trajectory (probe lag + offset).
-    
-    Parameters
-    ----------
-    pH_true: (n_times,) array of true pH values
-    t_grid: (n_times,) array of time points
-    tau_probe: probe time constant [s]
-    pH_offset: pH measurement offset
-    
-    Returns
-    -------
-    pH_meas: (n_times,) array of measured pH values (no noise added)
-    """
-    pH_meas = pH_true.copy()
-    
-    # Apply probe lag (first-order filter)
-    if tau_probe > 0.0:
-        for i in range(1, len(t_grid)):
-            dt = t_grid[i] - t_grid[i-1]
-            a = math.exp(-dt / max(tau_probe, 1e-12))
-            pH_meas[i] = a * pH_meas[i-1] + (1 - a) * pH_true[i]
-    
-    # Apply offset
-    pH_meas = pH_meas + pH_offset
-    
-    return pH_meas
-
-
 def forecast_ph(
     pH_prefix: np.ndarray,
     t_prefix: np.ndarray,
@@ -170,10 +138,11 @@ def forecast_ph(
     
     # Load model
     model, metadata, normalization_stats, prefix_length = load_early_inference_model(model_path, device)
-    infer_params = metadata.get('infer_params', ['activity_scale', 'k_d', 'tau_probe', 'pH_offset'])
+    infer_params = metadata.get('infer_params', ['E0_g_per_L', 'k_d'])
+    # Unified: exactly 5 known inputs (no powder_activity_frac)
     known_input_names = metadata.get('known_input_names', [
         'substrate_mM', 'grams_urease_powder', 'temperature_C',
-        'initial_pH', 'powder_activity_frac', 'volume_L'
+        'initial_pH', 'volume_L'
     ])
     
     # Prepare inputs
@@ -197,15 +166,12 @@ def forecast_ph(
     # Denormalize parameters
     params = denormalize_outputs(params_norm, normalization_stats)
     
-    # Create parameter dict
+    # Create parameter dict (unified: E0_g_per_L and k_d only)
     estimated_params = {name: float(val) for name, val in zip(infer_params, params)}
     
-    # Build simulator
+    # Build simulator (dummy base loading, will be overridden by E_eff0)
     S0 = known_inputs['substrate_mM'] / 1000.0  # mM → M
     T_K = known_inputs['temperature_C'] + 273.15
-    E_loading_base_g_per_L = (known_inputs['grams_urease_powder'] * 
-                             known_inputs['powder_activity_frac'] / 
-                             known_inputs['volume_L'])
     
     sim = UreaseSimulator(
         S0=S0,
@@ -214,27 +180,19 @@ def forecast_ph(
         Pt_total_M=0.0,
         T_K=T_K,
         initial_pH=known_inputs['initial_pH'],
-        E_loading_base_g_per_L=E_loading_base_g_per_L,
+        E_loading_base_g_per_L=1.0,  # Dummy value, overridden by E_eff0
         use_T_dependent_pH_activity=True,
     )
     
-    # Parameters for ODE solver
+    # Parameters for ODE solver (unified: use E_eff0 directly)
     sim_params = {
-        'a': estimated_params.get('activity_scale', 1.0),
+        'E_eff0': estimated_params.get('E0_g_per_L', 0.5),  # Direct enzyme loading [g/L]
         'k_d': estimated_params.get('k_d', 0.0),
         't_shift': 0.0,
-        'tau_probe': 0.0,  # Don't apply in simulator, apply separately
+        'tau_probe': 0.0,  # Not used (true pH space)
     }
     
-    # Simulate forward to get true pH
-    pH_true = sim.simulate_forward(sim_params, t_forecast, return_totals=False, apply_probe_lag=False)
-    
-    # Apply measurement model to match training distribution
-    # This predicts what the sensor will actually read
-    pH_forecast = apply_measurement_model(
-        pH_true, t_forecast,
-        tau_probe=estimated_params.get('tau_probe', 0.0),
-        pH_offset=estimated_params.get('pH_offset', 0.0)
-    )
+    # Simulate forward (true pH space)
+    pH_forecast = sim.simulate_forward(sim_params, t_forecast, return_totals=False, apply_probe_lag=False)
     
     return pH_forecast, estimated_params

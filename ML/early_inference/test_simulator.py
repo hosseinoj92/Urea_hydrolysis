@@ -30,12 +30,12 @@ def debug_log(location, message, data, hypothesis_id="A"):
 
 def test_simulator_reproduces_notebook(
     volume_L: float = 0.2,
-    grams_urease_powder: float = 0.05,
-    powder_activity_frac: float = 0.06,
-    substrate_mM: float = 20.0,
+    grams_urease_powder: float = 0.01,
+    powder_activity_frac: float = 0.01,
+    substrate_mM: float = 1.0,
     temperature_C: float = 20.0,
-    initial_pH: float = 7.3,
-    time_s: float = 1000.0,
+    initial_pH: float = 7,
+    time_s: float = 2000.0,
 ):
     """
     Test that refactored simulator matches notebook behavior.
@@ -88,7 +88,7 @@ def test_simulator_reproduces_notebook(
     }
     
     # Parameters WITH deactivation (user can modify this value)
-    k_d_deact = 2e-3 # Deactivation rate [1/s] - user can change this
+    k_d_deact = 5e-3 # Deactivation rate [1/s] - user can change this
     params_deact = params_no_deact.copy()
     params_deact['k_d'] = k_d_deact
     

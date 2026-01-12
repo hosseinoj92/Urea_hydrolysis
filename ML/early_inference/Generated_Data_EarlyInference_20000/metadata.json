@@ -2004,17 +2004,19 @@
     1998.999499749875,
     2000.0
   ],
+  "time_grid_mode": "uniform",
+  "time_grid_config": {
+    "n_times": 2000
+  },
   "prefix_lengths": [
-    10.0,
     30.0,
-    60.0
+    120.0,
+    600.0
   ],
   "prefix_n_points": 100,
   "infer_params": [
-    "activity_scale",
-    "k_d",
-    "tau_probe",
-    "pH_offset"
+    "E0_g_per_L",
+    "k_d"
   ],
   "param_ranges": {
     "substrate_mM": [
@@ -2033,29 +2035,13 @@
       6.5,
       7.5
     ],
-    "powder_activity_frac": [
-      0.01,
-      0.5
-    ],
-    "volume_L": [
-      0.1,
-      1.0
-    ],
-    "activity_scale": [
-      0.1,
-      2.0
+    "E0_g_per_L": [
+      0.0005,
+      1.25
     ],
     "k_d": [
       0.0,
       0.005
-    ],
-    "tau_probe": [
-      0.0,
-      30.0
-    ],
-    "pH_offset": [
-      -0.1,
-      0.1
     ]
   },
   "fixed_params": {
@@ -2064,15 +2050,14 @@
   "measurement_model": {
     "add_noise": true,
     "noise_std": 0.01,
-    "use_probe_lag": true,
-    "use_offset": true
+    "use_probe_lag": false,
+    "use_offset": false
   },
   "known_input_names": [
     "substrate_mM",
     "grams_urease_powder",
     "temperature_C",
     "initial_pH",
-    "powder_activity_frac",
     "volume_L"
   ]
 }

@@ -20,15 +20,15 @@ from early_inference_model import create_early_inference_model, gaussian_nll_los
 CONFIG = {
     # Data paths
     "data_dir": "Generated_Data_EarlyInference_20000",
-    "output_dir": "models_early_inference",
-    "prefix_length": 60.0,  # Which prefix length to train on (10, 30, or 60 seconds)
+    "output_dir": "models_early_inference_30s",
+    "prefix_length": 30.0,  # Which prefix length to train on (10, 30, or 60 seconds)
     
     # Training hyperparameters
     "batch_size": 128,
     "epochs": 100,
     "lr": 1e-3,
     "val_split": 0.2,
-    "early_stopping_patience": 20,
+    "early_stopping_patience": 25,
     
     # Model architecture
     "tcn_channels": [64, 128, 256],
@@ -267,20 +267,15 @@ def main():
     
     print(f"Train: {len(train_indices)} samples, Val: {len(val_indices)} samples")
     
-    # Extract time arrays from data (for future use - currently using zeros for backward compatibility)
-    # Note: To use actual time as features, load t_prefix from dataset and pass here
-    train_t = np.zeros_like(train_pH)  # TODO: Replace with actual t_prefix when ready
-    val_t = np.zeros_like(val_pH)      # TODO: Replace with actual t_prefix when ready
-    
     # Create datasets
     train_dataset = EarlyInferenceDataset(
-        train_pH, train_t, train_known, train_targets,
+        train_pH, np.zeros_like(train_pH), train_known, train_targets,
         normalize_inputs=CONFIG["normalize_inputs"],
         normalize_outputs=CONFIG["normalize_outputs"],
     )
     
     val_dataset = EarlyInferenceDataset(
-        val_pH, val_t, val_known, val_targets,
+        val_pH, np.zeros_like(val_pH), val_known, val_targets,
         normalize_inputs=CONFIG["normalize_inputs"],
         normalize_outputs=CONFIG["normalize_outputs"],
         input_stats={

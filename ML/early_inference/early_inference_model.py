@@ -112,8 +112,8 @@ class EarlyInferenceModel(nn.Module):
     def __init__(
         self,
         seq_length: int,
-        n_known_inputs: int = 6,
-        n_output_params: int = 4,
+        n_known_inputs: int = 5,  # Unified: substrate_mM, grams_urease_powder, temperature_C, initial_pH, volume_L
+        n_output_params: int = 2,  # Unified: E0_g_per_L, k_d
         tcn_channels: list = [64, 128, 256],
         tcn_kernel_size: int = 3,
         tcn_dropout: float = 0.2,
@@ -270,8 +270,8 @@ class EarlyInferenceModel(nn.Module):
 
 def create_early_inference_model(
     seq_length: int,
-    n_known_inputs: int = 6,
-    n_output_params: int = 4,
+    n_known_inputs: int = 5,  # Unified: substrate_mM, grams_urease_powder, temperature_C, initial_pH, volume_L
+    n_output_params: int = 2,  # Unified: E0_g_per_L, k_d
     tcn_channels: list = [64, 128, 256],
     tcn_kernel_size: int = 3,
     tcn_dropout: float = 0.2,
