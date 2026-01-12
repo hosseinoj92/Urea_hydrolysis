@@ -11,3 +11,4 @@
 *.log
 *.npz
 *.pt
+ML/DeepONet/models/
