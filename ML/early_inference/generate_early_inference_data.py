@@ -24,14 +24,15 @@ from mechanistic_simulator import UreaseSimulator
 # ╚══════════════════════════════════════════════════════════════╝
 CONFIG = {
     # Dataset generation parameters
-    "n_samples": 50000,           # Number of full trajectories to generate
+    "n_samples": 100000,           # Number of full trajectories to generate
     "t_max": 2000.0,              # Maximum time [s] for full trajectories
     "n_times": 2000,              # Number of time points in full trajectory
     "seed": 42,                    # Random seed for reproducibility
-    "output_dir": "Generated_Data_EarlyInference_20000",  # Output directory
-    
+    "output_dir": r"C:\Users\vt4ho\Simulations\simulation_data\Generated_Data_EarlyInference_100000",  # Output directory
+    "time_model": "uniform",
+
     # Prefix extraction (multiple prefix lengths for training)
-    "prefix_lengths": [30.0, 120.0, 600.0],  # Prefix lengths in seconds [s]
+    "prefix_lengths": [10, 30.0, 60.0],  # Prefix lengths in seconds [s]
     "prefix_n_points": 100,        # Number of points to extract from each prefix (uniform sampling)
     
     # Parameters to infer (unified parameterization: E0_g_per_L and k_d only)
@@ -43,15 +44,15 @@ CONFIG = {
     # Parameter sampling ranges (known inputs - exactly 4 sampled + 1 fixed)
     "param_ranges": {
         # Physical conditions (sampled)
-        "substrate_mM": [1.0, 100.0],
-        "grams_urease_powder": [0.01, 0.5],
+        "substrate_mM": [10.0, 100.0],
+        "grams_urease_powder": [0.05, 0.5],
         "temperature_C": [20.0, 40.0],
         "initial_pH": [6.5, 7.5],
         # volume_L is fixed (see fixed_params below) - NOT sampled
         
         # Latent parameters to infer (unified: E0_g_per_L and k_d only)
-        "E0_g_per_L": [5e-4, 1.25],  # Wide range covering slow to fast regimes
-        "k_d": [0.0, 5e-3],         # Deactivation rate [1/s]
+        "E0_g_per_L": [5e-2, 1.25],  # Wide range covering slow to fast regimes
+        "k_d": [0.00001, 5e-3],         # Deactivation rate [1/s]
     },
     
     # Fixed parameters (always constant, never sampled)
@@ -65,10 +66,11 @@ CONFIG = {
         "noise_std": 0.01,          # pH measurement noise std [pH units]
         "use_probe_lag": False,     # No probe lag (true pH space)
         "use_offset": False,        # No pH offset (true pH space)
+        
     },
     
     # Parallel processing
-    "n_workers": 8,
+    "n_workers": 16,
 }
 
 N0 = 0.0
@@ -129,7 +131,7 @@ def apply_measurement_model(pH_true: np.ndarray, t_grid: np.ndarray,
     return pH_meas
 
 
-def build_time_grid(mode: str = "uniform", t_max: float = 2000.0, 
+def build_time_grid(mode: str = CONFIG["time_model"], t_max: float = 2000.0, 
                     config: dict = None, n_times: int = None) -> np.ndarray:
     """
     Build time grid for simulation.
@@ -164,7 +166,7 @@ def build_time_grid(mode: str = "uniform", t_max: float = 2000.0,
             segments = [
                 (0.0, 60.0, 0.2),      # 0-60s: 0.2s spacing (dense early transient)
                 (60.0, 600.0, 1.0),    # 60-600s: 1s spacing (moderate)
-                (600.0, t_max, 10.0),  # 600-t_max: 10s spacing (sparse plateau)
+                (600.0, t_max, 5.0),  # 600-t_max: 10s spacing (sparse plateau)
             ]
         else:
             segments = config["segments"]

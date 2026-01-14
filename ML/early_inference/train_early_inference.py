@@ -19,16 +19,16 @@ from early_inference_model import create_early_inference_model, gaussian_nll_los
 # ╚══════════════════════════════════════════════════════════════╝
 CONFIG = {
     # Data paths
-    "data_dir": "Generated_Data_EarlyInference_20000",
-    "output_dir": "models_early_inference_30s",
+    "data_dir": r"C:\Users\vt4ho\Simulations\simulation_data\Generated_Data_EarlyInference_100000",
+    "output_dir": r"C:\Users\vt4ho\Simulations\simulation_data\models_early_inference_100000_30s",
     "prefix_length": 30.0,  # Which prefix length to train on (10, 30, or 60 seconds)
     
     # Training hyperparameters
-    "batch_size": 128,
-    "epochs": 100,
+    "batch_size": 256,
+    "epochs": 500,
     "lr": 1e-3,
     "val_split": 0.2,
-    "early_stopping_patience": 25,
+    "early_stopping_patience": 50,
     
     # Model architecture
     "tcn_channels": [64, 128, 256],

@@ -23,9 +23,9 @@ from mechanistic_simulator import UreaseSimulator
 # ╚══════════════════════════════════════════════════════════════╝
 CONFIG = {
     # Model and data paths
-    "model_path": "models_early_inference_30s/best_model_prefix_30s.pt",
-    "data_dir": "Generated_Data_EarlyInference_20000",
-    "output_dir": "evaluation_early_inference_30s",
+    "model_path": r"C:\Users\vt4ho\Simulations\simulation_data\models_early_inference_100000_30s\best_model_prefix_30s.pt",
+    "data_dir": r"C:\Users\vt4ho\Simulations\simulation_data\Generated_Data_EarlyInference_100000",
+    "output_dir":  r"C:\Users\vt4ho\Simulations\simulation_data\evaluation_early_inference_100000_30s",
     
     # Evaluation parameters
     "n_test_samples": 100,              # Number of test cases
@@ -37,8 +37,8 @@ CONFIG = {
     
     # Parameter fitting bounds (unified: E0_g_per_L and k_d only)
     "fit_bounds": {
-        "E0_g_per_L": (5e-4, 1.25),  # Wide range covering slow to fast regimes [g/L]
-        "k_d": (0.0, 5e-3),
+        "E0_g_per_L": (5e-2, 1.25),  # Wide range covering slow to fast regimes [g/L]
+        "k_d": (0.00001, 5e-3),
     },
 }
 
@@ -129,10 +129,10 @@ def evaluate_single_case(
     if len(t_prefix_uniform) == 0:
         return None
     
-    # For mechanistic fitting, use original non-uniform grid (better for optimization)
-    mask_prefix = t_full <= prefix_length
-    t_prefix_original = t_full[mask_prefix]
-    pH_prefix_original = pH_meas_full[mask_prefix]
+    # For mechanistic fitting, use the same uniformly resampled prefix as ML
+    # This ensures apples-to-apples comparison with the same prefix representation
+    t_prefix_fit = t_prefix_uniform
+    pH_prefix_fit = pH_prefix
     
     # Prepare known inputs array (unified: 5 inputs, no powder_activity_frac)
     known_input_names = metadata.get('known_input_names', [])
@@ -167,10 +167,10 @@ def evaluate_single_case(
     else:
         ml_powder_activity_frac_derived = np.nan
     
-    # Mechanistic parameter fitting (uses original non-uniform grid for better optimization)
+    # Mechanistic parameter fitting (uses same uniformly resampled prefix as ML)
     try:
         fit_params = fit_mechanistic_parameters(
-            pH_prefix_original, t_prefix_original, known_inputs,
+            pH_prefix_fit, t_prefix_fit, known_inputs,
             param_bounds=CONFIG["fit_bounds"]
         )
     except Exception as e:
