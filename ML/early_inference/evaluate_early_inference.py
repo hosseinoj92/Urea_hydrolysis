@@ -23,9 +23,9 @@ from mechanistic_simulator import UreaseSimulator
 # ╚══════════════════════════════════════════════════════════════╝
 CONFIG = {
     # Model and data paths
-    "model_path": r"C:\Users\vt4ho\Simulations\simulation_data\models_early_inference_100000_30s\best_model_prefix_30s.pt",
-    "data_dir": r"C:\Users\vt4ho\Simulations\simulation_data\Generated_Data_EarlyInference_100000",
-    "output_dir":  r"C:\Users\vt4ho\Simulations\simulation_data\evaluation_early_inference_100000_30s",
+    "model_path": r"C:\Users\vt4ho\Simulations\simulation_data\models\models_early_inference_50000_30s\best_model_prefix_30s.pt",
+    "data_dir": r"C:\Users\vt4ho\Simulations\simulation_data\generated_data\Generated_Data_EarlyInference_50000",
+    "output_dir":  r"C:\Users\vt4ho\Simulations\simulation_data\evaluation\evaluation_early_inference_50000_30s",
     
     # Evaluation parameters
     "n_test_samples": 100,              # Number of test cases
@@ -44,14 +44,38 @@ CONFIG = {
 
 
 def compute_metrics(y_true, y_pred):
-    """Compute regression metrics."""
+    """
+    Compute regression metrics.
+    
+    G1: Add diagnostics for negative R² and other issues.
+    """
     mae = np.mean(np.abs(y_true - y_pred))
     rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
     
-    # R²
+    # R² with diagnostics
     ss_res = np.sum((y_true - y_pred) ** 2)
     ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+    
+    # G1: Check for issues that cause negative R²
+    if ss_tot < 1e-12:
+        print(f"WARNING: Target variance too small: {ss_tot:.2e}")
+        print(f"  y_true range: [{y_true.min():.6f}, {y_true.max():.6f}]")
+        print(f"  y_true mean: {np.mean(y_true):.6f}")
+    
+    # Check if predictions are in reasonable range
+    if np.any(np.isnan(y_pred)) or np.any(np.isinf(y_pred)):
+        print(f"WARNING: Predictions contain NaN or Inf values!")
+        print(f"  y_pred range: [{np.nanmin(y_pred):.6f}, {np.nanmax(y_pred):.6f}]")
+    
     r2 = 1 - (ss_res / (ss_tot + 1e-12))
+    
+    # Warn if R² is negative
+    if r2 < 0:
+        print(f"WARNING: Negative R² = {r2:.6f}")
+        print(f"  This indicates predictions worse than mean baseline")
+        print(f"  ss_res = {ss_res:.6f}, ss_tot = {ss_tot:.6f}")
+        print(f"  y_true range: [{y_true.min():.6f}, {y_true.max():.6f}]")
+        print(f"  y_pred range: [{y_pred.min():.6f}, {y_pred.max():.6f}]")
     
     # Correlation
     if len(y_true) > 1:
@@ -139,19 +163,30 @@ def evaluate_single_case(
     known_inputs_array = np.array([known_inputs[name] for name in known_input_names])
     
     # ML parameter estimation (uses uniform prefix grid)
-    pH_seq_tensor, known_inputs_tensor = normalize_inputs(
-        pH_prefix, known_inputs_array, normalization_stats
+    pH_seq_tensor, t_seq_tensor, known_inputs_tensor = normalize_inputs(
+        pH_prefix, t_prefix_uniform, known_inputs_array, normalization_stats
     )
     
     with torch.no_grad():
         # normalize_inputs already adds batch dimension, so just move to device
         pH_seq_tensor = pH_seq_tensor.to(device)
+        t_seq_tensor = t_seq_tensor.to(device)  # Pass time to device!
         known_inputs_tensor = known_inputs_tensor.to(device)
-        mean, _ = model(pH_seq_tensor, known_inputs_tensor)
+        mean, _ = model(pH_seq_tensor, t_seq_tensor, known_inputs_tensor)  # Include time!
         params_norm = mean.cpu().numpy().squeeze()
     
+    # C2: Verify denormalization produces physical units
+    params_denorm = denormalize_outputs(params_norm, normalization_stats)
+    assert not np.any(np.isnan(params_denorm)), "Params contain NaN after denormalization"
+    # Verify params are in physical units (E0: 0.05-1.25, k_d: 1e-5 to 5e-3)
+    # Allow some margin for clipping that happens later
+    if not (0.001 < params_denorm[0] < 2.0):
+        print(f"WARNING: E0 out of expected range: {params_denorm[0]:.6f}")
+    if not (0.0 <= params_denorm[1] < 0.01):
+        print(f"WARNING: k_d out of expected range: {params_denorm[1]:.6f}")
+    
     ml_params = {name: float(val) for name, val in 
-                 zip(metadata['infer_params'], denormalize_outputs(params_norm, normalization_stats))}
+                 zip(metadata['infer_params'], params_denorm)}
     
     # Clamp ML predictions to valid bounds (prevents invalid negative/extreme values)
     ml_params['E0_g_per_L'] = float(np.clip(ml_params.get('E0_g_per_L', 0.5), 5e-4, 1.25))

@@ -19,22 +19,22 @@ from early_inference_model import create_early_inference_model, gaussian_nll_los
 # ╚══════════════════════════════════════════════════════════════╝
 CONFIG = {
     # Data paths
-    "data_dir": r"C:\Users\vt4ho\Simulations\simulation_data\Generated_Data_EarlyInference_100000",
-    "output_dir": r"C:\Users\vt4ho\Simulations\simulation_data\models_early_inference_100000_30s",
+    "data_dir": r"C:\Users\vt4ho\Simulations\simulation_data\generated_data\Generated_Data_EarlyInference_100000",
+    "output_dir": r"C:\Users\vt4ho\Simulations\simulation_data\models\models_early_inference_50000_30s",
     "prefix_length": 30.0,  # Which prefix length to train on (10, 30, or 60 seconds)
     
     # Training hyperparameters
     "batch_size": 256,
-    "epochs": 500,
-    "lr": 1e-3,
+    "epochs": 100,
+    "lr": 3e-3,
     "val_split": 0.2,
-    "early_stopping_patience": 50,
+    "early_stopping_patience": 10,
     
     # Model architecture
-    "tcn_channels": [64, 128, 256],
-    "tcn_kernel_size": 3,
+    "tcn_channels": [128, 256, 512, 512],
+    "tcn_kernel_size": 5,
     "tcn_dropout": 0.2,
-    "mlp_hidden_dims": [128, 64],
+    "mlp_hidden_dims": [256, 128],
     "output_dropout": 0.1,
     "use_uncertainty": True,
     
@@ -42,7 +42,9 @@ CONFIG = {
     "device": "auto",
     "normalize_inputs": True,
     "normalize_outputs": True,
+    "seed": 42,  # Random seed for reproducibility (train/val split, etc.)
 }
+
 
 
 class EarlyInferenceDataset(Dataset):
@@ -78,21 +80,53 @@ class EarlyInferenceDataset(Dataset):
                 # Compute stats from data
                 self.pH_mean = np.mean(pH_prefix)
                 self.pH_std = np.std(pH_prefix) + 1e-8
+                # B1: Normalize time per-sequence to preserve dt relationships (CRITICAL FIX)
+                # This preserves the relative spacing (dt) within each sequence
+                t_prefix_norm = []
+                for i in range(t_prefix.shape[0]):
+                    t_seq = t_prefix[i]
+                    if len(t_seq) > 1:
+                        t_mean_i = np.mean(t_seq)
+                        t_std_i = np.std(t_seq) + 1e-8
+                        t_prefix_norm.append((t_seq - t_mean_i) / t_std_i)
+                    else:
+                        t_prefix_norm.append(t_seq)
+                self.t_prefix = np.array(t_prefix_norm)
+                # Store dummy stats for compatibility (not used for per-sequence norm)
+                self.t_mean = 0.0
+                self.t_std = 1.0
                 self.known_mean = np.mean(known_inputs, axis=0, keepdims=True)
                 self.known_std = np.std(known_inputs, axis=0, keepdims=True) + 1e-8
             else:
                 self.pH_mean = input_stats["pH_mean"]
                 self.pH_std = input_stats["pH_std"]
+                # For validation, also normalize time per-sequence using stored approach
+                t_prefix_norm = []
+                for i in range(t_prefix.shape[0]):
+                    t_seq = t_prefix[i]
+                    if len(t_seq) > 1:
+                        t_mean_i = np.mean(t_seq)
+                        t_std_i = np.std(t_seq) + 1e-8
+                        t_prefix_norm.append((t_seq - t_mean_i) / t_std_i)
+                    else:
+                        t_prefix_norm.append(t_seq)
+                self.t_prefix = np.array(t_prefix_norm)
+                self.t_mean = input_stats.get("t_mean", 0.0)
+                self.t_std = input_stats.get("t_std", 1.0)
                 self.known_mean = input_stats["known_mean"]
                 self.known_std = input_stats["known_std"]
             
             self.pH_prefix = (pH_prefix - self.pH_mean) / self.pH_std
+            # t_prefix already normalized per-sequence above
             self.known_inputs = (known_inputs - self.known_mean) / self.known_std
         else:
             self.pH_prefix = pH_prefix
+            self.t_prefix = t_prefix  # Store time even if not normalizing
             self.known_inputs = known_inputs
             self.pH_mean = 0.0
             self.pH_std = 1.0
+            self.t_mean = 0.0
+            self.t_std = 1.0
             self.known_mean = np.zeros((1, self.n_known))
             self.known_std = np.ones((1, self.n_known))
         
@@ -113,6 +147,7 @@ class EarlyInferenceDataset(Dataset):
         
         # Convert to tensors
         self.pH_prefix = torch.FloatTensor(self.pH_prefix)
+        self.t_prefix = torch.FloatTensor(self.t_prefix)  # Store time as tensor!
         self.known_inputs = torch.FloatTensor(self.known_inputs)
         self.target_params = torch.FloatTensor(self.target_params)
     
@@ -122,6 +157,7 @@ class EarlyInferenceDataset(Dataset):
     def __getitem__(self, idx):
         return (
             self.pH_prefix[idx],      # (seq_len,)
+            self.t_prefix[idx],       # (seq_len,) - return time!
             self.known_inputs[idx],   # (n_known,)
             self.target_params[idx],  # (n_params,)
         )
@@ -132,6 +168,8 @@ class EarlyInferenceDataset(Dataset):
             "input": {
                 "pH_mean": self.pH_mean,
                 "pH_std": self.pH_std,
+                "t_mean": self.t_mean,
+                "t_std": self.t_std,
                 "known_mean": self.known_mean.squeeze().tolist(),
                 "known_std": self.known_std.squeeze().tolist(),
             },
@@ -151,23 +189,53 @@ def train_epoch(model, dataloader, optimizer, criterion, device, use_uncertainty
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{total_epochs} [Train]", 
                 unit="batch", leave=False, ncols=100)
     
-    for pH_seq, known_inputs, target_params in pbar:
+    for pH_seq, t_seq, known_inputs, target_params in pbar:
         pH_seq = pH_seq.to(device)
+        t_seq = t_seq.to(device)  # Pass time to device!
         known_inputs = known_inputs.to(device)
         target_params = target_params.to(device)
         
         optimizer.zero_grad()
         
-        # Forward pass
+        # Forward pass - now includes time!
         if use_uncertainty:
-            mean, logvar = model(pH_seq, known_inputs)
+            mean, logvar = model(pH_seq, t_seq, known_inputs)
             loss = gaussian_nll_loss(mean, logvar, target_params)
         else:
-            mean = model.predict(pH_seq, known_inputs)
+            mean = model.predict(pH_seq, t_seq, known_inputs)
             loss = criterion(mean, target_params)
+        
+        # F1: Monitor gradient norms for debugging (check if learning is happening)
+        # Enable this if loss isn't decreasing
+        if epoch == 0 and n_batches == 0:  # First batch of first epoch only
+            total_norm = 0
+            for p in model.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
+            total_norm = total_norm ** (1. / 2)
+            pbar.write(f"Initial gradient norm: {total_norm:.6f} (should be > 0.01)")
         
         # Backward pass
         loss.backward()
+        
+        # F1: Monitor gradient norms for debugging (check if learning is happening)
+        # Check gradients after backward, before clipping
+        if epoch == 0 and n_batches == 0:  # First batch of first epoch only
+            total_norm = 0
+            n_params_with_grad = 0
+            for p in model.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
+                    n_params_with_grad += 1
+            total_norm = total_norm ** (1. / 2)
+            pbar.write(f"Gradient check: norm={total_norm:.6f}, params_with_grad={n_params_with_grad}")
+            if total_norm < 1e-6:
+                pbar.write("WARNING: Gradients are very small! Learning may not happen.")
+        
+        # F2: Add gradient clipping to prevent exploding gradients
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         
         loss_val = loss.item()
@@ -192,16 +260,20 @@ def validate(model, dataloader, criterion, device, use_uncertainty: bool, epoch:
                 unit="batch", leave=False, ncols=100)
     
     with torch.no_grad():
-        for pH_seq, known_inputs, target_params in pbar:
+        for pH_seq, t_seq, known_inputs, target_params in pbar:
             pH_seq = pH_seq.to(device)
+            t_seq = t_seq.to(device)  # Pass time to device!
             known_inputs = known_inputs.to(device)
             target_params = target_params.to(device)
             
             if use_uncertainty:
-                mean, logvar = model(pH_seq, known_inputs)
+                mean, logvar = model(pH_seq, t_seq, known_inputs)  # Include time!
                 loss = gaussian_nll_loss(mean, logvar, target_params)
+                # D1: Check for negative loss (variance collapse/explosion)
+                if loss.item() < 0:
+                    pbar.write(f"WARNING: Negative loss {loss.item():.6f}, logvar range: [{logvar.min():.4f}, {logvar.max():.4f}]")
             else:
-                mean = model.predict(pH_seq, known_inputs)
+                mean = model.predict(pH_seq, t_seq, known_inputs)  # Include time!
                 loss = criterion(mean, target_params)
             
             loss_val = loss.item()
@@ -231,18 +303,37 @@ def main():
     # Load data for specified prefix length
     prefix_key = f"prefix_{int(prefix_length)}s"
     if prefix_key not in data:
-        raise ValueError(f"Prefix length {prefix_length}s not found in data. Available: {list(data.keys())}")
+        available = [k for k in data.keys() if k.startswith('prefix_')]
+        raise ValueError(f"Prefix length {prefix_length}s not found in data. Available: {available}")
     
     prefix_data = data[prefix_key].item()
     pH_prefix = prefix_data["pH_prefix"]
+    t_prefix = prefix_data["t_prefix"]  # Load actual time grid!
     known_inputs = prefix_data["known_inputs"]
     target_params = prefix_data["target_params"]
     
     with open(data_dir / "metadata.json", "r") as f:
         metadata = json.load(f)
     
-    print(f"Data shape: pH_prefix={pH_prefix.shape}, known_inputs={known_inputs.shape}, target_params={target_params.shape}")
+    print(f"Data shape: pH_prefix={pH_prefix.shape}, t_prefix={t_prefix.shape}, known_inputs={known_inputs.shape}, target_params={target_params.shape}")
     print(f"Infer params: {metadata['infer_params']}")
+    
+    # A3: Verify parameter ordering
+    assert list(metadata['infer_params']) == ['E0_g_per_L', 'k_d'], \
+        f"Param order mismatch! Expected ['E0_g_per_L', 'k_d'], got {metadata['infer_params']}"
+    
+    # I1: Add shape assertions
+    assert pH_prefix.shape[0] == t_prefix.shape[0] == known_inputs.shape[0] == target_params.shape[0], \
+        "Sample count mismatch across arrays"
+    assert pH_prefix.shape[1] == t_prefix.shape[1], "pH and time sequence length mismatch"
+    assert known_inputs.shape[1] == 5, f"Expected 5 known inputs, got {known_inputs.shape[1]}"
+    assert target_params.shape[1] == 2, f"Expected 2 target params, got {target_params.shape[1]}"
+    
+    # I2: Add range checks for target parameters
+    assert np.all(target_params[:, 0] >= 0.01), f"E0_g_per_L too small: min={target_params[:, 0].min():.6f}"
+    assert np.all(target_params[:, 0] <= 2.0), f"E0_g_per_L too large: max={target_params[:, 0].max():.6f}"
+    assert np.all(target_params[:, 1] >= 0), f"k_d negative: min={target_params[:, 1].min():.6f}"
+    assert np.all(target_params[:, 1] <= 0.01), f"k_d too large: max={target_params[:, 1].max():.6f}"
     
     # Device selection
     if CONFIG["device"] == "auto":
@@ -251,17 +342,21 @@ def main():
         device = torch.device(CONFIG["device"])
     print(f"Using device: {device}")
     
-    # Train/val split
+    # Train/val split (with fixed seed for reproducibility)
     n_samples = pH_prefix.shape[0]
     n_train = int(n_samples * (1 - CONFIG["val_split"]))
-    indices = np.random.permutation(n_samples)
+    # Use fixed seed for reproducible train/val split
+    rng = np.random.default_rng(CONFIG.get("seed", 42))
+    indices = rng.permutation(n_samples)
     train_indices = indices[:n_train]
     val_indices = indices[n_train:]
     
     train_pH = pH_prefix[train_indices]
+    train_t = t_prefix[train_indices]  # Load actual time grid!
     train_known = known_inputs[train_indices]
     train_targets = target_params[train_indices]
     val_pH = pH_prefix[val_indices]
+    val_t = t_prefix[val_indices]  # Load actual time grid!
     val_known = known_inputs[val_indices]
     val_targets = target_params[val_indices]
     
@@ -269,18 +364,20 @@ def main():
     
     # Create datasets
     train_dataset = EarlyInferenceDataset(
-        train_pH, np.zeros_like(train_pH), train_known, train_targets,
+        train_pH, train_t, train_known, train_targets,  # Use actual time grid!
         normalize_inputs=CONFIG["normalize_inputs"],
         normalize_outputs=CONFIG["normalize_outputs"],
     )
     
     val_dataset = EarlyInferenceDataset(
-        val_pH, np.zeros_like(val_pH), val_known, val_targets,
+        val_pH, val_t, val_known, val_targets,  # Use actual time grid!
         normalize_inputs=CONFIG["normalize_inputs"],
         normalize_outputs=CONFIG["normalize_outputs"],
         input_stats={
             "pH_mean": train_dataset.pH_mean,
             "pH_std": train_dataset.pH_std,
+            "t_mean": train_dataset.t_mean,
+            "t_std": train_dataset.t_std,
             "known_mean": train_dataset.known_mean,
             "known_std": train_dataset.known_std,
         },
@@ -313,11 +410,19 @@ def main():
     n_model_params = sum(p.numel() for p in model.parameters())
     print(f"Model created: {n_model_params:,} parameters")
     
+    # E2: Check TCN receptive field is sufficient
+    kernel_size = CONFIG["tcn_kernel_size"]
+    num_levels = len(CONFIG["tcn_channels"])
+    receptive_field = 1 + sum(2 * (kernel_size - 1) * (2 ** i) for i in range(num_levels))
+    print(f"TCN receptive field: {receptive_field}, Sequence length: {seq_length}")
+    if receptive_field < seq_length:
+        print(f"WARNING: Receptive field ({receptive_field}) < sequence length ({seq_length})")
+        print("  Model may not see full sequence. Consider increasing TCN depth or kernel size.")
+    
     # Loss and optimizer
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=CONFIG["lr"])
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
-    
     # Training loop
     output_dir = Path(CONFIG["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)

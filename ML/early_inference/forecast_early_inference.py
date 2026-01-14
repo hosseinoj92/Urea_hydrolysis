@@ -46,20 +46,22 @@ def load_early_inference_model(model_path: Path, device: torch.device):
     return model, metadata, normalization_stats, prefix_length
 
 
-def normalize_inputs(pH_seq: np.ndarray, known_inputs: np.ndarray, 
-                    normalization_stats: dict) -> Tuple[torch.Tensor, torch.Tensor]:
+def normalize_inputs(pH_seq: np.ndarray, t_seq: np.ndarray, known_inputs: np.ndarray, 
+                    normalization_stats: dict) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Normalize inputs using saved statistics.
     
     Parameters
     ----------
     pH_seq: (seq_len,) array
+    t_seq: (seq_len,) array of time values
     known_inputs: (n_known,) array
     normalization_stats: dict with input normalization stats
     
     Returns
     -------
     pH_seq_norm: (1, seq_len) tensor
+    t_seq_norm: (1, seq_len) tensor
     known_inputs_norm: (1, n_known) tensor
     """
     input_stats = normalization_stats.get('input', {})
@@ -69,6 +71,15 @@ def normalize_inputs(pH_seq: np.ndarray, known_inputs: np.ndarray,
     pH_std = input_stats.get('pH_std', 1.0)
     pH_seq_norm = (pH_seq - pH_mean) / pH_std
     
+    # Normalize time grid per-sequence (same as training - preserves dt relationships)
+    # Note: Saved t_mean and t_std are dummy values (0.0, 1.0) since we use per-sequence norm
+    if len(t_seq) > 1:
+        t_mean_seq = np.mean(t_seq)
+        t_std_seq = np.std(t_seq) + 1e-8
+        t_seq_norm = (t_seq - t_mean_seq) / t_std_seq
+    else:
+        t_seq_norm = t_seq
+    
     # Normalize known inputs
     known_mean = np.array(input_stats.get('known_mean', [0.0] * len(known_inputs)))
     known_std = np.array(input_stats.get('known_std', [1.0] * len(known_inputs)))
@@ -76,9 +87,10 @@ def normalize_inputs(pH_seq: np.ndarray, known_inputs: np.ndarray,
     
     # Convert to tensors
     pH_seq_tensor = torch.FloatTensor(pH_seq_norm).unsqueeze(0)  # (1, seq_len)
+    t_seq_tensor = torch.FloatTensor(t_seq_norm).unsqueeze(0)  # (1, seq_len)
     known_inputs_tensor = torch.FloatTensor(known_inputs_norm).unsqueeze(0)  # (1, n_known)
     
-    return pH_seq_tensor, known_inputs_tensor
+    return pH_seq_tensor, t_seq_tensor, known_inputs_tensor
 
 
 def denormalize_outputs(params_norm: np.ndarray, normalization_stats: dict) -> np.ndarray:
@@ -151,16 +163,17 @@ def forecast_ph(
         known_inputs[name] for name in known_input_names
     ])
     
-    # Normalize inputs
-    pH_seq_tensor, known_inputs_tensor = normalize_inputs(
-        pH_prefix, known_inputs_array, normalization_stats
+    # Normalize inputs (now includes time!)
+    pH_seq_tensor, t_seq_tensor, known_inputs_tensor = normalize_inputs(
+        pH_prefix, t_prefix, known_inputs_array, normalization_stats
     )
     
     # Predict parameters
     with torch.no_grad():
         pH_seq_tensor = pH_seq_tensor.to(device)
+        t_seq_tensor = t_seq_tensor.to(device)  # Pass time to device!
         known_inputs_tensor = known_inputs_tensor.to(device)
-        mean, logvar = model(pH_seq_tensor, known_inputs_tensor)
+        mean, logvar = model(pH_seq_tensor, t_seq_tensor, known_inputs_tensor)  # Include time!
         params_norm = mean.cpu().numpy().squeeze()
     
     # Denormalize parameters

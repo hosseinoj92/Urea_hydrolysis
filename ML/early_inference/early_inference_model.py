@@ -103,10 +103,15 @@ class EarlyInferenceModel(nn.Module):
     Early inference model that estimates parameters from pH prefix sequences.
     
     Architecture:
-    - TCN processes pH sequence
+    - TCN processes pH sequence, time grid, and dt (3-channel input: pH + time + dt)
     - MLP processes known inputs
     - Concatenate and pass through output head
     - Outputs mean and log-variance for uncertainty quantification
+    
+    The time grid and dt (sampling interval) are critical for learning sampling
+    rate differences (1s vs 10s) and temporal dynamics of the pH trajectory.
+    dt is computed explicitly as t[i] - t[i-1] to help the model distinguish
+    different sampling cadences.
     """
     
     def __init__(
@@ -129,9 +134,10 @@ class EarlyInferenceModel(nn.Module):
         self.use_uncertainty = use_uncertainty
         
         # TCN for pH sequence processing
-        # Input: (batch, 1, seq_len) - pH values
+        # B3: Input: (batch, 3, seq_len) - pH values, time grid, and dt (sampling interval)
+        # Adding dt as explicit feature helps model learn sampling rate differences
         self.tcn = TCN(
-            num_inputs=1,
+            num_inputs=3,  # pH + time + dt
             num_channels=tcn_channels,
             kernel_size=tcn_kernel_size,
             dropout=tcn_dropout,
@@ -181,7 +187,8 @@ class EarlyInferenceModel(nn.Module):
     
     def forward(
         self, 
-        pH_seq: torch.Tensor, 
+        pH_seq: torch.Tensor,
+        t_seq: torch.Tensor,
         known_inputs: torch.Tensor
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
@@ -190,6 +197,7 @@ class EarlyInferenceModel(nn.Module):
         Parameters
         ----------
         pH_seq: (batch_size, seq_length) tensor of pH values
+        t_seq: (batch_size, seq_length) tensor of time values
         known_inputs: (batch_size, n_known_inputs) tensor of known inputs
         
         Returns
@@ -199,11 +207,19 @@ class EarlyInferenceModel(nn.Module):
         """
         batch_size = pH_seq.shape[0]
         
-        # Process pH sequence with TCN
-        # Reshape: (batch, seq_len) -> (batch, 1, seq_len)
-        pH_seq = pH_seq.unsqueeze(1)  # (batch, 1, seq_len)
+        # Process pH sequence, time grid, and dt with TCN
+        # B3: Compute dt (sampling interval) explicitly as third channel
+        # dt[i] = t[i] - t[i-1], with dt[0] = dt[1] (pad first element)
+        dt = t_seq[:, 1:] - t_seq[:, :-1]  # (batch, seq_len-1)
+        dt_padded = torch.cat([dt[:, 0:1], dt], dim=1)  # (batch, seq_len) - pad first element
         
-        tcn_out = self.tcn(pH_seq)  # (batch, tcn_channels[-1], seq_len)
+        # Concatenate pH, time, and dt: (batch, 3, seq_len)
+        pH_seq = pH_seq.unsqueeze(1)  # (batch, 1, seq_len)
+        t_seq = t_seq.unsqueeze(1)    # (batch, 1, seq_len)
+        dt_padded = dt_padded.unsqueeze(1)  # (batch, 1, seq_len)
+        seq_input = torch.cat([pH_seq, t_seq, dt_padded], dim=1)  # (batch, 3, seq_len)
+        
+        tcn_out = self.tcn(seq_input)  # (batch, tcn_channels[-1], seq_len)
         tcn_pooled = self.pool(tcn_out).squeeze(-1)  # (batch, tcn_channels[-1])
         
         # Process known inputs with MLP
@@ -221,23 +237,24 @@ class EarlyInferenceModel(nn.Module):
             mean = self.output_head(combined)
             return mean, None
     
-    def predict(self, pH_seq: torch.Tensor, known_inputs: torch.Tensor) -> torch.Tensor:
+    def predict(self, pH_seq: torch.Tensor, t_seq: torch.Tensor, known_inputs: torch.Tensor) -> torch.Tensor:
         """
         Predict parameters (returns mean only).
         
         Parameters
         ----------
         pH_seq: (batch_size, seq_length) tensor
+        t_seq: (batch_size, seq_length) tensor of time values
         known_inputs: (batch_size, n_known_inputs) tensor
         
         Returns
         -------
         params: (batch_size, n_output_params) tensor
         """
-        mean, _ = self.forward(pH_seq, known_inputs)
+        mean, _ = self.forward(pH_seq, t_seq, known_inputs)
         return mean
     
-    def sample(self, pH_seq: torch.Tensor, known_inputs: torch.Tensor, 
+    def sample(self, pH_seq: torch.Tensor, t_seq: torch.Tensor, known_inputs: torch.Tensor, 
                n_samples: int = 1) -> torch.Tensor:
         """
         Sample parameters from predicted distribution (if uncertainty enabled).
@@ -245,6 +262,7 @@ class EarlyInferenceModel(nn.Module):
         Parameters
         ----------
         pH_seq: (batch_size, seq_length) tensor
+        t_seq: (batch_size, seq_length) tensor of time values
         known_inputs: (batch_size, n_known_inputs) tensor
         n_samples: number of samples to draw
         
@@ -253,10 +271,10 @@ class EarlyInferenceModel(nn.Module):
         samples: (batch_size, n_samples, n_output_params) tensor
         """
         if not self.use_uncertainty:
-            mean = self.predict(pH_seq, known_inputs)
+            mean = self.predict(pH_seq, t_seq, known_inputs)
             return mean.unsqueeze(1).expand(-1, n_samples, -1)
         
-        mean, logvar = self.forward(pH_seq, known_inputs)
+        mean, logvar = self.forward(pH_seq, t_seq, known_inputs)
         std = torch.exp(0.5 * logvar)
         batch_size = mean.shape[0]
         
@@ -317,6 +335,8 @@ def gaussian_nll_loss(mean: torch.Tensor, logvar: torch.Tensor,
     """
     Gaussian negative log-likelihood loss.
     
+    D1: Clamp logvar to prevent extreme values that cause negative loss or numerical issues.
+    
     Parameters
     ----------
     mean: (batch_size, n_params) predicted means
@@ -327,5 +347,31 @@ def gaussian_nll_loss(mean: torch.Tensor, logvar: torch.Tensor,
     -------
     loss: scalar tensor
     """
+    # D1: Fix to prevent negative loss while preserving gradients
+    # The issue: when logvar is very negative (small variance) and error is small,
+    # loss = 0.5 * (logvar + precision * error) can be negative
+    # Solution: Apply minimum variance floor and include log(2*pi) term
+    
+    # Apply minimum variance floor: ensures variance >= 0.01
+    # This prevents infinite precision while allowing model to learn
+    # log(0.01) ≈ -4.6, so clamp logvar to [-4.6, 10]
+    min_logvar = -4.6  # Minimum variance of 0.01
+    logvar = torch.clamp(logvar, min=min_logvar, max=10.0)
+    
+    # Compute precision (inverse variance) and squared error
     precision = torch.exp(-logvar)
-    return 0.5 * (logvar + precision * (target - mean) ** 2).mean()
+    sq_error = (target - mean) ** 2
+    
+    # Full NLL formula: 0.5 * (log(2*pi) + logvar + precision * sq_error)
+    # Including log(2*pi) ≈ 1.84 ensures loss is typically positive
+    # This is the standard formulation and preserves all gradients
+    log_2pi = 1.8378770664093453  # log(2*pi)
+    nll = 0.5 * (log_2pi + logvar + precision * sq_error)
+    
+    # With min_logvar = -4.6 and log_2pi = 1.84:
+    # Worst case (logvar=-4.6, error=0): nll = 0.5 * (1.84 - 4.6) = -1.38
+    # But in practice, precision * sq_error is usually > 0, so loss is positive
+    # If it occasionally goes slightly negative, that's fine for optimization
+    # (it just means model is very confident and correct)
+    
+    return nll.mean()

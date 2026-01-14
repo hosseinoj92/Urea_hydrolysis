@@ -24,7 +24,7 @@ from mechanistic_simulator import UreaseSimulator
 # ╚══════════════════════════════════════════════════════════════╝
 CONFIG = {
     # Dataset generation parameters
-    "n_samples": 100000,           # Number of full trajectories to generate
+    "n_samples": 50000,           # Number of full trajectories to generate
     "t_max": 2000.0,              # Maximum time [s] for full trajectories
     "n_times": 2000,              # Number of time points in full trajectory
     "seed": 42,                    # Random seed for reproducibility
@@ -45,8 +45,8 @@ CONFIG = {
     "param_ranges": {
         # Physical conditions (sampled)
         "substrate_mM": [10.0, 100.0],
-        "grams_urease_powder": [0.05, 0.5],
-        "temperature_C": [20.0, 40.0],
+        "grams_urease_powder": [0.01, 0.1],
+        "temperature_C": [25.0, 40.0],
         "initial_pH": [6.5, 7.5],
         # volume_L is fixed (see fixed_params below) - NOT sampled
         
@@ -480,21 +480,33 @@ def main():
         max_len = max(len(seq) for seq in training_data[prefix_length]["pH_prefix"])
         max_len = max(max_len, CONFIG["prefix_n_points"])
         
-        # Pad sequences
+        # Pad sequences (A5: Use interpolation for time, not edge padding)
         pH_prefix_padded = []
         t_prefix_padded = []
         for i in range(n_examples):
             pH_seq = training_data[prefix_length]["pH_prefix"][i]
             t_seq = training_data[prefix_length]["t_prefix"][i]
             
-            # Pad to max_len
+            # A5: Use linear interpolation instead of edge padding to preserve temporal structure
             if len(pH_seq) < max_len:
-                pad_len = max_len - len(pH_seq)
-                pH_seq = np.pad(pH_seq, (0, pad_len), mode='edge')
-                t_seq = np.pad(t_seq, (0, pad_len), mode='edge')
+                # Interpolate to uniform grid from 0 to prefix_length
+                t_old = t_seq
+                t_new = np.linspace(0, prefix_length, max_len)
+                pH_seq = np.interp(t_new, t_old, pH_seq)
+                t_seq = t_new
+            elif len(pH_seq) > max_len:
+                # Truncate if longer (shouldn't happen, but handle gracefully)
+                pH_seq = pH_seq[:max_len]
+                t_seq = t_seq[:max_len]
             
-            pH_prefix_padded.append(pH_seq[:max_len])
-            t_prefix_padded.append(t_seq[:max_len])
+            pH_prefix_padded.append(pH_seq)
+            t_prefix_padded.append(t_seq)
+        
+        # A5: Verify no duplicate time values after processing
+        for i, t_seq in enumerate(t_prefix_padded):
+            if len(np.unique(t_seq)) < len(t_seq):
+                print(f"WARNING: Sample {i} has duplicate time values after processing!")
+                print(f"  Unique times: {len(np.unique(t_seq))}, Total times: {len(t_seq)}")
         
         # Convert known inputs to array (unified: exactly 5, order must match known_input_names)
         # Order: substrate_mM, grams_urease_powder, temperature_C, initial_pH, volume_L
