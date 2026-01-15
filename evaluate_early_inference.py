@@ -23,13 +23,13 @@ from mechanistic_simulator import UreaseSimulator
 # ╚══════════════════════════════════════════════════════════════╝
 CONFIG = {
     # Model and data paths
-    "model_path": r"C:\Users\vt4ho\Simulations\simulation_data\models\models_early_inference_50000_10s\best_model_prefix_10s.pt",
-    "data_dir": r"C:\Users\vt4ho\Simulations\simulation_data\generated_data\Generated_Data_EarlyInference_50000",
-    "output_dir":  r"C:\Users\vt4ho\Simulations\simulation_data\evaluation\evaluation_early_inference_50000_10s",
+    "model_path": r"C:\Users\vt4ho\Simulations\simulation_data\models\imperfect\models_early_inference_50000_30s\best_model_prefix_30s.pt",
+    "data_dir": r"C:\Users\vt4ho\Simulations\simulation_data\generated_data\imperfect\Generated_Data_EarlyInference_50000",
+    "output_dir":  r"C:\Users\vt4ho\Simulations\simulation_data\evaluation\imperfect\evaluation_early_inference_50000_30s",
     
     # Evaluation parameters
     "n_test_samples": 100,              # Number of test cases
-    "prefix_length": 10.0,              # Length of prefix to reveal [s]
+    "prefix_length": 30.0,              # Length of prefix to reveal [s]
     "t_max": 2000.0,                    # Full trajectory length [s] (should match data generation)
     "reference_grid_dt": 5.0,           # Reference grid spacing [s] for fair comparison (uniform)
     "device": "auto",
@@ -40,6 +40,9 @@ CONFIG = {
         "E0_g_per_L": (5e-2, 1.25),  # Wide range covering slow to fast regimes [g/L]
         "k_d": (0.00001, 5e-3),
     },
+    
+    # Part C: Fitting configuration
+    "fit_nuisance_params": False,  # If True, fit nuisance parameters; if False, use ground truth (fairer comparison)
 }
 
 
@@ -131,6 +134,8 @@ def evaluate_single_case(
     reference_grid_dt: float,  # Uniform spacing for reference grid
     device: torch.device,
     output_dir: Path,
+    nuisance_params: dict = None,  # Part C: Nuisance parameters from data generation
+    fit_nuisance_params: bool = False,  # Part C: Whether to fit nuisance parameters
 ) -> dict:
     """
     Evaluate a single test case and write per-sample CSV.
@@ -146,12 +151,29 @@ def evaluate_single_case(
     """
     # Extract prefix and interpolate onto uniform grid (same as training)
     prefix_n_points = metadata.get('prefix_n_points', 100)
-    t_prefix_uniform, pH_prefix = extract_prefix(
+    t_prefix_raw, pH_prefix_raw = extract_prefix(
         pH_meas_full, t_full, prefix_length, prefix_n_points
     )
     
-    if len(t_prefix_uniform) == 0:
+    if len(t_prefix_raw) == 0:
         return None
+    
+    # CRITICAL FIX: Interpolate to exactly prefix_n_points (matching training format)
+    # extract_prefix() may return fewer points if original data is sparse
+    # Model expects exactly prefix_n_points, so we must interpolate
+    if len(pH_prefix_raw) < prefix_n_points:
+        # Interpolate to uniform grid from 0 to prefix_length (same as training)
+        t_prefix_uniform = np.linspace(0, prefix_length, prefix_n_points)
+        pH_prefix = np.interp(t_prefix_uniform, t_prefix_raw, pH_prefix_raw)
+    elif len(pH_prefix_raw) > prefix_n_points:
+        # If somehow more points, sample uniformly (shouldn't happen, but handle gracefully)
+        indices = np.linspace(0, len(pH_prefix_raw) - 1, prefix_n_points, dtype=int)
+        t_prefix_uniform = t_prefix_raw[indices]
+        pH_prefix = pH_prefix_raw[indices]
+    else:
+        # Already exactly prefix_n_points
+        t_prefix_uniform = t_prefix_raw
+        pH_prefix = pH_prefix_raw
     
     # For mechanistic fitting, use the same uniformly resampled prefix as ML
     # This ensures apples-to-apples comparison with the same prefix representation
@@ -202,11 +224,25 @@ def evaluate_single_case(
     else:
         ml_powder_activity_frac_derived = np.nan
     
-    # Mechanistic parameter fitting (uses same uniformly resampled prefix as ML)
+    # Part C: Mechanistic parameter fitting (uses same uniformly resampled prefix as ML)
+    # If nuisance parameters are available and fitting is enabled, include them
     try:
+        # Determine which real-world effects to enable based on nuisance params
+        enable_meas = (nuisance_params is not None and 
+                      any(k in nuisance_params for k in ['pH_offset', 'pH_drift_rate', 'tau_smoothing']))
+        enable_gas = (nuisance_params is not None and 
+                     any(k in nuisance_params for k in ['gas_exchange_k', 'gas_exchange_C_eq']))
+        enable_mix = (nuisance_params is not None and 
+                     'mixing_ramp_time_s' in nuisance_params)
+        
         fit_params = fit_mechanistic_parameters(
             pH_prefix_fit, t_prefix_fit, known_inputs,
-            param_bounds=CONFIG["fit_bounds"]
+            param_bounds=CONFIG["fit_bounds"],
+            fit_nuisance_params=fit_nuisance_params,
+            enable_measurement_effects=enable_meas,
+            enable_gas_exchange=enable_gas,
+            enable_mixing_ramp=enable_mix,
+            use_integral_objective=True,  # Part B: Use integral-based objective
         )
     except Exception as e:
         print(f"Warning: Fitting failed for sample {sample_id}: {e}")
@@ -241,23 +277,62 @@ def evaluate_single_case(
     t_ref = np.arange(0.0, t_max + reference_grid_dt/2, reference_grid_dt)
     t_ref[-1] = t_max  # Ensure t_max is exactly included
     
-    # ML forecast (full trajectory on reference grid) - use E_eff0 directly
+    # Part C: ML forecast (full trajectory on reference grid) - use E_eff0 directly
+    # For fair comparison, use same nuisance params as ground truth (ML doesn't predict these)
     sim_params_ml = {
         'E_eff0': ml_params.get('E0_g_per_L', 0.5),  # Direct enzyme loading [g/L]
         'k_d': ml_params.get('k_d', 0.0),
         't_shift': 0.0,
         'tau_probe': 0.0,  # Not used (true pH space)
     }
-    pH_ml_full = sim.simulate_forward(sim_params_ml, t_ref, return_totals=False, apply_probe_lag=False)
+    # Add nuisance params if available (for fair comparison with ground truth)
+    if nuisance_params:
+        sim_params_ml.update(nuisance_params)
     
-    # Fit forecast (full trajectory on reference grid) - use E_eff0 directly
+    enable_meas = (nuisance_params is not None and 
+                  any(k in nuisance_params for k in ['pH_offset', 'pH_drift_rate', 'tau_smoothing']))
+    enable_gas = (nuisance_params is not None and 
+                 any(k in nuisance_params for k in ['gas_exchange_k', 'gas_exchange_C_eq']))
+    enable_mix = (nuisance_params is not None and 
+                 'mixing_ramp_time_s' in nuisance_params)
+    
+    pH_ml_full = sim.simulate_forward(
+        sim_params_ml, t_ref, 
+        return_totals=False, 
+        apply_probe_lag=False,
+        enable_measurement_effects=enable_meas,
+        enable_gas_exchange=enable_gas,
+        enable_mixing_ramp=enable_mix,
+    )
+    
+    # Part C: Fit forecast (full trajectory on reference grid) - use E_eff0 directly
+    # Use fitted nuisance params if available, otherwise use ground truth nuisance params
     sim_params_fit = {
         'E_eff0': fit_params.get('E0_g_per_L', 0.5),  # Direct enzyme loading [g/L]
         'k_d': fit_params.get('k_d', 0.0),
         't_shift': 0.0,
         'tau_probe': 0.0,  # Not used (true pH space)
     }
-    pH_fit_full = sim.simulate_forward(sim_params_fit, t_ref, return_totals=False, apply_probe_lag=False)
+    # Add nuisance params (prefer fitted, fallback to ground truth for fair comparison)
+    if fit_nuisance_params:
+        # Use fitted nuisance params
+        fitted_nuisance = {k: fit_params.get(k, 0.0) for k in 
+                          ['pH_offset', 'pH_drift_rate', 'tau_smoothing',
+                           'gas_exchange_k', 'gas_exchange_C_eq', 'mixing_ramp_time_s']
+                          if k in fit_params}
+        sim_params_fit.update(fitted_nuisance)
+    elif nuisance_params:
+        # Use ground truth nuisance params (for fair comparison)
+        sim_params_fit.update(nuisance_params)
+    
+    pH_fit_full = sim.simulate_forward(
+        sim_params_fit, t_ref, 
+        return_totals=False, 
+        apply_probe_lag=False,
+        enable_measurement_effects=enable_meas,
+        enable_gas_exchange=enable_gas,
+        enable_mixing_ramp=enable_mix,
+    )
     
     # Interpolate ground truth to reference grid
     interp_func = interp1d(t_full, pH_true_full, kind='linear', bounds_error=False, fill_value='extrapolate')
@@ -545,6 +620,14 @@ def main():
         # True parameters
         true_params = result['target_params']
         
+        # Part C: Extract nuisance parameters (if available)
+        nuisance_params = result.get('nuisance_params', {})
+        
+        # Part C: Configuration for fitting nuisance parameters
+        # Set to True to allow fitting to estimate nuisance factors
+        # Set to False to use ground truth nuisance params (fairer comparison)
+        fit_nuisance_params = CONFIG.get("fit_nuisance_params", False)
+        
         # Evaluate
         summary = evaluate_single_case(
             sample_idx,
@@ -552,7 +635,9 @@ def main():
             pH_true_full,
             t_full, known_inputs, true_params,
             model, metadata, normalization_stats, prefix_length,
-            t_max, CONFIG.get("reference_grid_dt", 5.0), device, output_dir
+            t_max, CONFIG.get("reference_grid_dt", 5.0), device, output_dir,
+            nuisance_params=nuisance_params,
+            fit_nuisance_params=fit_nuisance_params,
         )
         
         if summary is not None:

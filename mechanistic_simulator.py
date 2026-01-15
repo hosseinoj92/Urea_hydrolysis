@@ -251,9 +251,20 @@ class UreaseSimulator:
         E0_g_per_L: float,
         k_deact_per_s: float = 0.0,
         use_strip_NH3: bool = False,
-        kLa_NH3_s: float = 0.0
+        kLa_NH3_s: float = 0.0,
+        # Part A: Real-world effects
+        mixing_ramp_time_s: float = 0.0,  # Mixing/dispersion: smooth turn-on time [s]
+        gas_exchange_k: float = 0.0,  # Gas exchange: first-order rate [1/s]
+        gas_exchange_C_eq: float = 0.0,  # Gas exchange: equilibrium C [M]
     ):
-        """Build RHS(t,y) with optional 1st-order deactivation and NH3 stripping."""
+        """
+        Build RHS(t,y) with optional 1st-order deactivation, NH3 stripping, and real-world effects.
+        
+        Real-world effects (Part A):
+        - mixing_ramp_time_s: Smooth turn-on of reaction rate during initial mixing [s]
+        - gas_exchange_k: First-order rate for CO2 exchange with environment [1/s]
+        - gas_exchange_C_eq: Equilibrium inorganic carbon concentration [M]
+        """
         def rhs(t, y):
             S, Ntot, Ctot = y
             sp = self.compute_speciation(Ntot, Ctot, self.Pt_total_M)
@@ -262,7 +273,22 @@ class UreaseSimulator:
             per_g = self.rate_per_g(S, Ntot, pH, P_inhib)
             # Active enzyme (g/L)
             E_active = E0_g_per_L * math.exp(-max(k_deact_per_s, 0.0) * max(t, 0.0))
-            r_NH3 = per_g * E_active  # mol/L/s produced
+            
+            # Part A: Mixing/dispersion - smooth turn-on of reaction rate
+            # Represents non-instantaneous mixing at experiment start
+            # Uses smooth sigmoid-like function: 0.5 * (1 + tanh((t - t_ramp/2) / (t_ramp/4)))
+            # This gives ~0 at t=0, ~1 at t=t_ramp, smooth transition
+            if mixing_ramp_time_s > 0.0:
+                if t < mixing_ramp_time_s:
+                    # Smooth ramp: goes from 0 to 1 over mixing_ramp_time_s
+                    # Using tanh for smooth S-curve
+                    ramp_frac = 0.5 * (1.0 + math.tanh((t - mixing_ramp_time_s/2.0) / (mixing_ramp_time_s/6.0)))
+                else:
+                    ramp_frac = 1.0
+            else:
+                ramp_frac = 1.0
+            
+            r_NH3 = per_g * E_active * ramp_frac  # mol/L/s produced (with mixing ramp)
             
             # #region agent log
             if t == 0.0 or (t > 0 and t % 100.0 < 0.1):  # Log at start and periodically
@@ -272,14 +298,23 @@ class UreaseSimulator:
                     "E0": float(E0_g_per_L),
                     "E_active": float(E_active),
                     "E_active_frac": float(E_active / E0_g_per_L) if E0_g_per_L > 0 else 0.0,
-                    "r_NH3": float(r_NH3)
+                    "r_NH3": float(r_NH3),
+                    "mixing_ramp_frac": float(ramp_frac)
                 }, "F")
             # #endregion
             # Gas loss (mol/L/s)
             r_strp_NH3 = (kLa_NH3_s * sp['NH3']) if use_strip_NH3 else 0.0
+            
+            # Part A: Gas exchange - CO2 exchange with environment
+            # Simple first-order mass transfer toward equilibrium
+            # dC/dt includes: production from reaction + exchange term
+            r_gas_exchange = 0.0
+            if gas_exchange_k > 0.0:
+                r_gas_exchange = gas_exchange_k * (gas_exchange_C_eq - Ctot)  # [M/s]
+            
             dS_dt = -0.5 * r_NH3
             dN_dt = r_NH3 - r_strp_NH3
-            dC_dt = 0.5 * r_NH3
+            dC_dt = 0.5 * r_NH3 + r_gas_exchange  # Add gas exchange term
             return [dS_dt, dN_dt, dC_dt]
         return rhs
     
@@ -288,7 +323,11 @@ class UreaseSimulator:
         params: Dict[str, float],
         t_grid: np.ndarray,
         return_totals: bool = False,
-        apply_probe_lag: bool = False
+        apply_probe_lag: bool = False,
+        # Part A: Real-world effects configuration
+        enable_measurement_effects: bool = False,  # Enable measurement layer effects
+        enable_gas_exchange: bool = False,  # Enable gas exchange in ODE
+        enable_mixing_ramp: bool = False,  # Enable mixing/dispersion ramp
     ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
         """
         Forward simulation of pH(t) or totals (urea, total ammonia, total carbon).
@@ -303,12 +342,25 @@ class UreaseSimulator:
             - 't_shift': time shift [s] (default 0.0)
             - 'tau_probe': probe lag time [s] (default 0.0, only used if apply_probe_lag=True)
             - 'kLa_NH3': NH3 stripping rate [1/s] (default 0.0)
+            - Part A - Real-world effects (only used if corresponding enable_* flag is True):
+              - 'mixing_ramp_time_s': mixing ramp time [s] (default 0.0)
+              - 'gas_exchange_k': gas exchange rate [1/s] (default 0.0)
+              - 'gas_exchange_C_eq': equilibrium C [M] (default 0.0)
+              - 'pH_offset': measurement offset [pH units] (default 0.0)
+              - 'pH_drift_rate': drift rate [pH units/s] (default 0.0)
+              - 'tau_smoothing': instrument smoothing time constant [s] (default 0.0)
         t_grid : np.ndarray
             Time points [s] at which to evaluate
         return_totals : bool
             If True, return (S, Ntot, Ctot) instead of pH
         apply_probe_lag : bool
             If True, apply first-order probe lag to pH output
+        enable_measurement_effects : bool
+            If True, apply measurement bias/drift and smoothing
+        enable_gas_exchange : bool
+            If True, include gas exchange in ODE
+        enable_mixing_ramp : bool
+            If True, include mixing/dispersion ramp in reaction rate
         
         Returns:
         --------
@@ -328,6 +380,14 @@ class UreaseSimulator:
         tau_probe = params.get('tau_probe', 0.0)
         kLa_NH3 = params.get('kLa_NH3', 0.0)
         use_strip = (kLa_NH3 > 0.0)
+        
+        # Part A: Extract real-world effect parameters
+        mixing_ramp_time_s = params.get('mixing_ramp_time_s', 0.0) if enable_mixing_ramp else 0.0
+        gas_exchange_k = params.get('gas_exchange_k', 0.0) if enable_gas_exchange else 0.0
+        gas_exchange_C_eq = params.get('gas_exchange_C_eq', 0.0) if enable_gas_exchange else 0.0
+        pH_offset = params.get('pH_offset', 0.0) if enable_measurement_effects else 0.0
+        pH_drift_rate = params.get('pH_drift_rate', 0.0) if enable_measurement_effects else 0.0
+        tau_smoothing = params.get('tau_smoothing', 0.0) if enable_measurement_effects else 0.0
         
         # #region agent log
         debug_log("mechanistic_simulator.py:295", "k_deact extracted", {
@@ -350,12 +410,15 @@ class UreaseSimulator:
         else:
             t_eval = t_model
         
-        # Build RHS and integrate
+        # Build RHS and integrate (with real-world effects if enabled)
         rhs = self.make_rhs(
             E0,
             k_deact_per_s=max(k_deact, 0.0),
             use_strip_NH3=use_strip,
-            kLa_NH3_s=max(kLa_NH3, 0.0)
+            kLa_NH3_s=max(kLa_NH3, 0.0),
+            mixing_ramp_time_s=mixing_ramp_time_s,
+            gas_exchange_k=gas_exchange_k,
+            gas_exchange_C_eq=gas_exchange_C_eq,
         )
         y0 = [self.S0, self.N0, self.C0]
         
@@ -395,23 +458,49 @@ class UreaseSimulator:
         if return_totals:
             return S, Ntot, Ctot
         
-        # Convert totals → pH
+        # Convert totals → pH (this is the "true" pH from chemistry)
         pH_true = np.empty(len(t_grid), dtype=float)
         for i in range(len(t_grid)):
             sp = self.compute_speciation(Ntot[i], Ctot[i], self.Pt_total_M)
             pH_true[i] = sp['pH']
         
-        # Apply probe lag if requested
+        # Part A: Apply measurement layer effects in order:
+        # 1. Probe lag (existing, if enabled)
+        # 2. Measurement bias and drift (new)
+        # 3. Instrument smoothing (new, beyond probe lag)
+        
+        # Step 1: Apply probe lag if requested (first-order response)
         if apply_probe_lag and tau_probe > 0.0:
-            pH_meas = np.empty_like(pH_true, dtype=float)
-            pH_meas[0] = pH_true[0]
+            pH_after_lag = np.empty_like(pH_true, dtype=float)
+            pH_after_lag[0] = pH_true[0]
             for i in range(1, len(t_grid)):
                 dt = t_grid[i] - t_grid[i-1]  # Use original t_grid for dt
                 a = math.exp(-dt / max(tau_probe, 1e-12))
-                pH_meas[i] = a * pH_meas[i-1] + (1 - a) * pH_true[i]
+                pH_after_lag[i] = a * pH_after_lag[i-1] + (1 - a) * pH_true[i]
+        else:
+            pH_after_lag = pH_true
+        
+        # Step 2: Apply measurement bias and drift (constant offset + linear drift)
+        # This represents probe calibration offset and slow drift over time
+        if enable_measurement_effects and (pH_offset != 0.0 or pH_drift_rate != 0.0):
+            pH_after_bias = pH_after_lag + pH_offset + pH_drift_rate * t_grid
+        else:
+            pH_after_bias = pH_after_lag
+        
+        # Step 3: Apply instrument smoothing (low-pass filter beyond probe lag)
+        # This represents additional smoothing from instrument electronics/firmware
+        # Applied as exponential moving average with time constant tau_smoothing
+        if enable_measurement_effects and tau_smoothing > 0.0:
+            pH_meas = np.empty_like(pH_after_bias, dtype=float)
+            pH_meas[0] = pH_after_bias[0]
+            for i in range(1, len(t_grid)):
+                dt = t_grid[i] - t_grid[i-1]
+                a = math.exp(-dt / max(tau_smoothing, 1e-12))
+                pH_meas[i] = a * pH_meas[i-1] + (1 - a) * pH_after_bias[i]
             return pH_meas
         
-        return pH_true
+        # If no measurement effects, return pH after bias (or after lag, or true)
+        return pH_after_bias
 
 
 def simulate_forward(
@@ -424,7 +513,10 @@ def simulate_forward(
     initial_pH: float = 7.36,
     E_loading_base_g_per_L: float = 0.5,
     return_totals: bool = False,
-    apply_probe_lag: bool = False
+    apply_probe_lag: bool = False,
+    enable_measurement_effects: bool = False,
+    enable_gas_exchange: bool = False,
+    enable_mixing_ramp: bool = False,
 ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """
     Convenience function for forward simulation.
@@ -439,4 +531,11 @@ def simulate_forward(
         initial_pH=initial_pH,
         E_loading_base_g_per_L=E_loading_base_g_per_L
     )
-    return sim.simulate_forward(params, t_grid, return_totals=return_totals, apply_probe_lag=apply_probe_lag)
+    return sim.simulate_forward(
+        params, t_grid, 
+        return_totals=return_totals, 
+        apply_probe_lag=apply_probe_lag,
+        enable_measurement_effects=enable_measurement_effects,
+        enable_gas_exchange=enable_gas_exchange,
+        enable_mixing_ramp=enable_mixing_ramp,
+    )

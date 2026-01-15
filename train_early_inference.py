@@ -19,20 +19,20 @@ from early_inference_model import create_early_inference_model, gaussian_nll_los
 # ╚══════════════════════════════════════════════════════════════╝
 CONFIG = {
     # Data paths
-    "data_dir": r"C:\Users\vt4ho\Simulations\simulation_data\generated_data\Generated_Data_EarlyInference_50000",
-    "output_dir": r"C:\Users\vt4ho\Simulations\simulation_data\models\models_early_inference_50000_10s",
-    "prefix_length": 10.0,  # Which prefix length to train on (10, 30, or 60 seconds)
+    "data_dir": r"C:\Users\vt4ho\Simulations\simulation_data\generated_data\imperfect\Generated_Data_EarlyInference_50000",
+    "output_dir": r"C:\Users\vt4ho\Simulations\simulation_data\models\imperfect\models_early_inference_50000_30s",
+    "prefix_length": 30.0,  # Which prefix length to train on (10, 30, or 60 seconds)
     
     # Training hyperparameters
-    "batch_size": 256,
+    "batch_size": 128,
     "epochs": 100,
-    "lr": 8e-3,
+    "lr": 5e-4,
     "val_split": 0.2,
     "early_stopping_patience": 35,
     
     # Model architecture
     "tcn_channels": [128, 256, 512, 512],
-    "tcn_kernel_size": 5,
+    "tcn_kernel_size": 7,
     "tcn_dropout": 0.2,
     "mlp_hidden_dims": [256, 128],
     "output_dropout": 0.1,

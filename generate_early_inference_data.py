@@ -28,11 +28,11 @@ CONFIG = {
     "t_max": 2000.0,              # Maximum time [s] for full trajectories
     "n_times": 2000,              # Number of time points in full trajectory
     "seed": 42,                    # Random seed for reproducibility
-    "output_dir": r"C:\Users\vt4ho\Simulations\simulation_data\Generated_Data_EarlyInference_100000",  # Output directory
+    "output_dir": r"C:\Users\vt4ho\Simulations\simulation_data\generated_data\imperfect\Generated_Data_EarlyInference_50000",  # Output directory
     "time_model": "uniform",
 
     # Prefix extraction (multiple prefix lengths for training)
-    "prefix_lengths": [10, 30.0, 60.0],  # Prefix lengths in seconds [s]
+    "prefix_lengths": [30.0, 60.0, 300],  # Prefix lengths in seconds [s]
     "prefix_n_points": 100,        # Number of points to extract from each prefix (uniform sampling)
     
     # Parameters to infer (unified parameterization: E0_g_per_L and k_d only)
@@ -66,7 +66,27 @@ CONFIG = {
         "noise_std": 0.01,          # pH measurement noise std [pH units]
         "use_probe_lag": False,     # No probe lag (true pH space)
         "use_offset": False,        # No pH offset (true pH space)
+    },
+    
+    # Part C: Real-world effects (nuisance variability for ML training)
+    "real_world_effects": {
+        "enable": True,  # If True, include real-world effects in training data
+        "enable_measurement_effects": True,  # Measurement bias/drift/smoothing
+        "enable_gas_exchange": True,  # Gas exchange with environment
+        "enable_mixing_ramp": True,  # Mixing/dispersion at start
         
+        # Nuisance parameter sampling ranges (randomly drawn per sample)
+        "nuisance_ranges": {
+            # Measurement effects
+            "pH_offset": (-0.05, 0.05),  # Probe offset [pH units]
+            "pH_drift_rate": (-5e-5, 5e-5),  # Slow drift [pH units/s]
+            "tau_smoothing": (0.0, 5.0),  # Instrument smoothing [s]
+            # Gas exchange
+            "gas_exchange_k": (0.0, 5e-5),  # Exchange rate [1/s]
+            "gas_exchange_C_eq": (0.0, 0.002),  # Equilibrium C [M]
+            # Mixing/dispersion
+            "mixing_ramp_time_s": (0.0, 20.0),  # Mixing ramp time [s]
+        },
     },
     
     # Parallel processing
@@ -103,7 +123,7 @@ def sample_parameters(n_samples: int, seed: int = 42) -> dict:
 
 
 def apply_measurement_model(pH_true: np.ndarray, t_grid: np.ndarray, 
-                           noise_std: float, add_noise: bool) -> np.ndarray:
+                           noise_std: float, add_noise: bool, seed: int = None) -> np.ndarray:
     """
     Apply measurement model to true pH trajectory.
     
@@ -115,6 +135,7 @@ def apply_measurement_model(pH_true: np.ndarray, t_grid: np.ndarray,
     t_grid: (n_times,) array of time points
     noise_std: standard deviation of measurement noise
     add_noise: if True, add noise
+    seed: random seed for reproducibility (if None, uses unseeded RNG)
     
     Returns
     -------
@@ -124,7 +145,7 @@ def apply_measurement_model(pH_true: np.ndarray, t_grid: np.ndarray,
     
     # Add noise
     if add_noise and noise_std > 0.0:
-        rng = np.random.default_rng()
+        rng = np.random.default_rng(seed)  # Use seed for reproducibility
         noise = rng.normal(0.0, noise_std, size=pH_meas.shape)
         pH_meas = pH_meas + noise
     
@@ -251,6 +272,8 @@ def _worker_generate_single_trajectory(args_tuple):
     
     Unified parameterization: samples E0_g_per_L directly, no powder_activity_frac.
     
+    Part C: Extended to include real-world effects (nuisance variability).
+    
     Returns: (index, result_dict, error)
     """
     index, params_dict, t_grid, constants = args_tuple
@@ -266,6 +289,25 @@ def _worker_generate_single_trajectory(args_tuple):
         # Extract latent parameters to infer (unified: E0_g_per_L and k_d)
         E0_g_per_L = params_dict["E0_g_per_L"]
         k_d = params_dict["k_d"]
+        
+        # Part C: Sample nuisance parameters if real-world effects are enabled
+        # Use index as seed for reproducibility (deterministic per sample)
+        rng = np.random.default_rng(seed=index + CONFIG.get("seed", 42))
+        nuisance_params = {}
+        rwe_config = CONFIG.get("real_world_effects", {})
+        enable_rwe = rwe_config.get("enable", False)
+        
+        if enable_rwe:
+            nuisance_ranges = rwe_config.get("nuisance_ranges", {})
+            if rwe_config.get("enable_measurement_effects", False):
+                nuisance_params["pH_offset"] = rng.uniform(*nuisance_ranges.get("pH_offset", (0.0, 0.0)))
+                nuisance_params["pH_drift_rate"] = rng.uniform(*nuisance_ranges.get("pH_drift_rate", (0.0, 0.0)))
+                nuisance_params["tau_smoothing"] = rng.uniform(*nuisance_ranges.get("tau_smoothing", (0.0, 0.0)))
+            if rwe_config.get("enable_gas_exchange", False):
+                nuisance_params["gas_exchange_k"] = rng.uniform(*nuisance_ranges.get("gas_exchange_k", (0.0, 0.0)))
+                nuisance_params["gas_exchange_C_eq"] = rng.uniform(*nuisance_ranges.get("gas_exchange_C_eq", (0.0, 0.0)))
+            if rwe_config.get("enable_mixing_ramp", False):
+                nuisance_params["mixing_ramp_time_s"] = rng.uniform(*nuisance_ranges.get("mixing_ramp_time_s", (0.0, 0.0)))
         
         # Convert to physical quantities
         S0 = substrate_mM / 1000.0  # mM → M
@@ -289,14 +331,32 @@ def _worker_generate_single_trajectory(args_tuple):
             "k_d": k_d,
             "t_shift": 0.0,
         }
+        # Add nuisance parameters
+        params.update(nuisance_params)
         
-        # Simulate forward to get true pH (no probe lag, no offset)
-        pH_true = sim.simulate_forward(params, t_grid, return_totals=False, apply_probe_lag=False)
+        # Part C: Simulate with real-world effects if enabled
+        enable_meas = rwe_config.get("enable_measurement_effects", False) if enable_rwe else False
+        enable_gas = rwe_config.get("enable_gas_exchange", False) if enable_rwe else False
+        enable_mix = rwe_config.get("enable_mixing_ramp", False) if enable_rwe else False
+        
+        # Simulate forward with real-world effects
+        # Note: When measurement effects are enabled, this includes offset/drift/smoothing
+        # but NOT noise (noise is added separately below)
+        pH_with_effects = sim.simulate_forward(
+            params, t_grid, 
+            return_totals=False, 
+            apply_probe_lag=False,
+            enable_measurement_effects=enable_meas,
+            enable_gas_exchange=enable_gas,
+            enable_mixing_ramp=enable_mix,
+        )
         
         # Apply measurement model (simplified: optional noise only)
+        # Pass seed for reproducibility (deterministic per sample)
         mm = CONFIG["measurement_model"]
         pH_meas = apply_measurement_model(
-            pH_true, t_grid, mm["noise_std"], mm["add_noise"]
+            pH_with_effects, t_grid, mm["noise_std"], mm["add_noise"],
+            seed=index + CONFIG.get("seed", 42)  # Deterministic seed per sample
         )
         
         # Extract prefixes
@@ -321,18 +381,24 @@ def _worker_generate_single_trajectory(args_tuple):
         }
         
         # Target parameters (to infer - unified: E0_g_per_L and k_d)
+        # Note: nuisance parameters are NOT targets - ML should learn to be robust to them
         target_params = {
             "E0_g_per_L": E0_g_per_L,
             "k_d": k_d,
         }
         
         result = {
-            "pH_true": pH_true,
-            "pH_meas": pH_meas,
+            # Store pH with effects (includes measurement effects if enabled, but not noise)
+            # This is what would be measured in ideal conditions (no noise)
+            # For ground truth comparison, use this (it includes real-world effects)
+            "pH_true": pH_with_effects,  # Renamed from pH_true for clarity
+            "pH_meas": pH_meas,  # Includes noise on top of pH_with_effects
             "t_grid": t_grid.copy(),  # Store time grid for evaluation
             "prefix_data": prefix_data,
             "known_inputs": known_inputs,
             "target_params": target_params,
+            # Part C: Store nuisance parameters for reference (not ML targets)
+            "nuisance_params": nuisance_params if enable_rwe else {},
         }
         
         return (index, result, None)
