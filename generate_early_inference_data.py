@@ -24,16 +24,22 @@ from mechanistic_simulator import UreaseSimulator
 # ╚══════════════════════════════════════════════════════════════╝
 CONFIG = {
     # Dataset generation parameters
-    "n_samples": 50000,           # Number of full trajectories to generate
+    "n_samples": 100000,           # Number of full trajectories to generate
     "t_max": 2000.0,              # Maximum time [s] for full trajectories
     "n_times": 2000,              # Number of time points in full trajectory
+    # Note: Increasing n_times (e.g., to 10000) improves simulation accuracy but
+    # does NOT affect training data (prefix extraction still gives 100 points).
+    # Only increase if you need finer ODE integration, not for ML training.
     "seed": 42,                    # Random seed for reproducibility
-    "output_dir": r"C:\Users\vt4ho\Simulations\simulation_data\generated_data\imperfect\Generated_Data_EarlyInference_50000",  # Output directory
+    "output_dir": r"C:\Users\vt4ho\Simulations\simulation_data\generated_data\imperfect\version_2\Generated_Data_EarlyInference_100000",  # Output directory
     "time_model": "uniform",
 
     # Prefix extraction (multiple prefix lengths for training)
-    "prefix_lengths": [30.0, 60.0, 300],  # Prefix lengths in seconds [s]
-    "prefix_n_points": 100,        # Number of points to extract from each prefix (uniform sampling)
+    "prefix_lengths": [30.0, 60.0, 120.0],  # Prefix lengths in seconds [s]
+    "prefix_n_points": 300,        # Base number of points to extract from each prefix (uniform sampling)
+    # Note: For longer prefixes, consider using adaptive_n_points=True to maintain temporal resolution
+    "use_adaptive_n_points": True,  # If True, scales n_points with prefix_length to maintain dt
+    "target_dt": 0.3,  # Target temporal resolution [s] when using adaptive_n_points
     
     # Parameters to infer (unified parameterization: E0_g_per_L and k_d only)
     "infer_params": [
@@ -52,7 +58,7 @@ CONFIG = {
         
         # Latent parameters to infer (unified: E0_g_per_L and k_d only)
         "E0_g_per_L": [5e-2, 1.25],  # Wide range covering slow to fast regimes
-        "k_d": [0.00001, 5e-3],         # Deactivation rate [1/s]
+        "k_d": [1e-5, 5e-3],         # Deactivation rate [1/s]
     },
     
     # Fixed parameters (always constant, never sampled)
@@ -82,8 +88,8 @@ CONFIG = {
             "pH_drift_rate": (-5e-5, 5e-5),  # Slow drift [pH units/s]
             "tau_smoothing": (0.0, 5.0),  # Instrument smoothing [s]
             # Gas exchange
-            "gas_exchange_k": (0.0, 5e-5),  # Exchange rate [1/s]
-            "gas_exchange_C_eq": (0.0, 0.002),  # Equilibrium C [M]
+            "gas_exchange_k": (0.0, 1e-5),  # Exchange rate [1/s]
+            "gas_exchange_C_eq": (0.0, 1e-4),  # Equilibrium C [M]
             # Mixing/dispersion
             "mixing_ramp_time_s": (0.0, 20.0),  # Mixing ramp time [s]
         },
@@ -227,6 +233,30 @@ def build_time_grid(mode: str = CONFIG["time_model"], t_max: float = 2000.0,
         raise ValueError(f"Unknown time_grid_mode: {mode}. Must be 'uniform', 'piecewise', or 'geometric'")
 
 
+def get_adaptive_prefix_n_points(prefix_length: float, base_n_points: int = 100, 
+                                 target_dt: float = 0.3) -> int:
+    """
+    Calculate adaptive number of points for prefix extraction.
+    
+    Maintains similar temporal resolution (dt) across different prefix lengths.
+    This helps prevent information dilution in longer prefixes.
+    
+    Parameters
+    ----------
+    prefix_length: Length of prefix [s]
+    base_n_points: Base number of points (for short prefixes)
+    target_dt: Target temporal resolution [s] (default 0.3s for good resolution)
+    
+    Returns
+    -------
+    n_points: Recommended number of points
+    """
+    n_points = max(base_n_points, int(prefix_length / target_dt))
+    # Round to nearest 10 for cleaner numbers
+    n_points = int(np.round(n_points / 10) * 10)
+    return n_points
+
+
 def extract_prefix(pH_meas: np.ndarray, t_grid: np.ndarray, 
                    prefix_length: float, n_points: int) -> tuple:
     """
@@ -362,8 +392,18 @@ def _worker_generate_single_trajectory(args_tuple):
         # Extract prefixes
         prefix_data = {}
         for prefix_length in CONFIG["prefix_lengths"]:
+            # Use adaptive n_points if enabled (maintains temporal resolution)
+            if CONFIG.get("use_adaptive_n_points", False):
+                n_points = get_adaptive_prefix_n_points(
+                    prefix_length, 
+                    CONFIG["prefix_n_points"],
+                    CONFIG.get("target_dt", 0.3)
+                )
+            else:
+                n_points = CONFIG["prefix_n_points"]
+            
             t_prefix, pH_prefix = extract_prefix(
-                pH_meas, t_grid, prefix_length, CONFIG["prefix_n_points"]
+                pH_meas, t_grid, prefix_length, n_points
             )
             prefix_data[prefix_length] = {
                 "t": t_prefix,
@@ -624,6 +664,8 @@ def main():
         "time_grid_config": {"n_times": n_times},  # Config for rebuilding grid
         "prefix_lengths": CONFIG["prefix_lengths"],
         "prefix_n_points": CONFIG["prefix_n_points"],
+        "use_adaptive_n_points": CONFIG.get("use_adaptive_n_points", False),
+        "target_dt": CONFIG.get("target_dt", 0.3),
         "infer_params": CONFIG["infer_params"],  # ["E0_g_per_L", "k_d"]
         "param_ranges": CONFIG["param_ranges"],
         "fixed_params": CONFIG.get("fixed_params", {}),

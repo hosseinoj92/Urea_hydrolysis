@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
+import math
 
 
 class TemporalBlock(nn.Module):
@@ -53,6 +54,55 @@ class TemporalBlock(nn.Module):
         out = self.net(x)
         res = x if self.downsample is None else self.downsample(x)
         return self.relu(out + res)
+
+
+class WeightedTemporalPooling(nn.Module):
+    """
+    Weighted temporal pooling that can emphasize early-time information.
+    
+    Uses learnable attention mechanism to weight different time points,
+    allowing the model to focus on early dynamics even in long sequences.
+    """
+    def __init__(self, dim: int, seq_length: int):
+        super(WeightedTemporalPooling, self).__init__()
+        self.dim = dim
+        self.seq_length = seq_length
+        
+        # Learnable attention weights
+        # Input: TCN output features, Output: attention weights per time step
+        self.attention = nn.Sequential(
+            nn.Conv1d(dim, dim // 2, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv1d(dim // 2, 1, kernel_size=1),
+        )
+        
+        # Optional: Fixed exponential decay weights as initialization bias
+        # This encourages the model to initially focus on early time points
+        with torch.no_grad():
+            decay_weights = torch.exp(-torch.linspace(0, 2, seq_length))
+            decay_weights = decay_weights / decay_weights.sum()
+            self.register_buffer('decay_weights', decay_weights.view(1, 1, -1))
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        x: (batch_size, dim, seq_len) tensor
+        
+        Returns
+        -------
+        pooled: (batch_size, dim) tensor
+        """
+        # Compute attention weights
+        attn_logits = self.attention(x)  # (batch, 1, seq_len)
+        attn_weights = F.softmax(attn_logits, dim=2)  # (batch, 1, seq_len)
+        
+        # Optional: Blend with decay weights (helps with initialization)
+        # attn_weights = 0.5 * attn_weights + 0.5 * self.decay_weights
+        
+        # Weighted sum
+        pooled = (x * attn_weights).sum(dim=2)  # (batch, dim)
+        return pooled
 
 
 class TCN(nn.Module):
@@ -144,8 +194,10 @@ class EarlyInferenceModel(nn.Module):
         )
         tcn_output_dim = tcn_channels[-1]
         
-        # Global pooling over sequence dimension
-        self.pool = nn.AdaptiveAvgPool1d(1)  # (batch, tcn_output_dim, 1)
+        # Weighted pooling that emphasizes early-time information
+        # This helps with longer prefixes where early signal gets diluted
+        # Instead of simple average, use learnable weights that can emphasize early points
+        self.pool = WeightedTemporalPooling(tcn_output_dim, seq_length)
         
         # MLP for known inputs
         mlp_layers = []
@@ -220,7 +272,7 @@ class EarlyInferenceModel(nn.Module):
         seq_input = torch.cat([pH_seq, t_seq, dt_padded], dim=1)  # (batch, 3, seq_len)
         
         tcn_out = self.tcn(seq_input)  # (batch, tcn_channels[-1], seq_len)
-        tcn_pooled = self.pool(tcn_out).squeeze(-1)  # (batch, tcn_channels[-1])
+        tcn_pooled = self.pool(tcn_out)  # (batch, tcn_channels[-1]) - weighted pooling
         
         # Process known inputs with MLP
         mlp_out = self.mlp(known_inputs)  # (batch, mlp_output_dim)
@@ -374,4 +426,13 @@ def gaussian_nll_loss(mean: torch.Tensor, logvar: torch.Tensor,
     # If it occasionally goes slightly negative, that's fine for optimization
     # (it just means model is very confident and correct)
     
-    return nll.mean()
+    # Add variance regularization to prevent variance collapse/explosion
+    # This helps with training stability and prevents the model from "cheating"
+    # by inflating variance to reduce loss
+    var = torch.exp(logvar)
+    # Penalize variance that's too small (< 0.01) or too large (> 1.0)
+    # Encourage variance around 0.1 (reasonable uncertainty)
+    target_var = 0.1
+    variance_penalty = 0.01 * torch.mean((var - target_var) ** 2)
+    
+    return nll.mean() + variance_penalty

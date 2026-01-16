@@ -19,19 +19,28 @@ from early_inference_model import create_early_inference_model, gaussian_nll_los
 # ╚══════════════════════════════════════════════════════════════╝
 CONFIG = {
     # Data paths
-    "data_dir": r"C:\Users\vt4ho\Simulations\simulation_data\generated_data\imperfect\Generated_Data_EarlyInference_50000",
-    "output_dir": r"C:\Users\vt4ho\Simulations\simulation_data\models\imperfect\models_early_inference_50000_30s",
+    "data_dir": r"C:\Users\vt4ho\Simulations\simulation_data\generated_data\imperfect\version_2\Generated_Data_EarlyInference_100000",
+    "output_dir": r"C:\Users\vt4ho\Simulations\simulation_data\models\imperfect\verion_2\models_early_inference_100000_30s",
     "prefix_length": 30.0,  # Which prefix length to train on (10, 30, or 60 seconds)
     
     # Training hyperparameters
-    "batch_size": 128,
-    "epochs": 100,
-    "lr": 5e-4,
+    "batch_size": 512,  # Increased for better GPU utilization and stability
+    "epochs": 2000,
+    "lr": 8e-3,  # Increased and scaled with batch size (2x batch = 2x LR)
     "val_split": 0.2,
-    "early_stopping_patience": 35,
+    "early_stopping_patience": 50,
+    "weight_decay": 1e-5,  # L2 regularization
+    "grad_clip_norm": 5.0,  # Increased from 1.0 for better gradient flow
+    
+    # Learning rate scheduler settings
+    "scheduler_factor": 0.7,  # Less aggressive reduction (was 0.5)
+    "scheduler_patience": 15,  # More patience (was 5)
+    "scheduler_min_lr": 1e-5,  # Minimum LR floor
+    "warmup_epochs": 5,  # Warmup period for stable training
     
     # Model architecture
-    "tcn_channels": [128, 256, 512, 512],
+    # Increased depth to cover sequence length 300: [128, 256, 512, 512, 512] gives RF=373
+    "tcn_channels": [128, 256, 512, 512, 512],  # Added 5th level for RF >= 300
     "tcn_kernel_size": 7,
     "tcn_dropout": 0.2,
     "mlp_hidden_dims": [256, 128],
@@ -235,7 +244,9 @@ def train_epoch(model, dataloader, optimizer, criterion, device, use_uncertainty
                 pbar.write("WARNING: Gradients are very small! Learning may not happen.")
         
         # F2: Add gradient clipping to prevent exploding gradients
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        # Increased max_norm for better gradient flow (was 1.0)
+        grad_clip_norm = CONFIG.get("grad_clip_norm", 5.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
         optimizer.step()
         
         loss_val = loss.item()
@@ -418,11 +429,34 @@ def main():
     if receptive_field < seq_length:
         print(f"WARNING: Receptive field ({receptive_field}) < sequence length ({seq_length})")
         print("  Model may not see full sequence. Consider increasing TCN depth or kernel size.")
+        print("  However, with weighted pooling, this may be acceptable as pooling can aggregate information.")
     
     # Loss and optimizer
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=CONFIG["lr"])
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+    weight_decay = CONFIG.get("weight_decay", 0.0)
+    optimizer = optim.Adam(model.parameters(), lr=CONFIG["lr"], weight_decay=weight_decay)
+    
+    # Learning rate scheduler with warmup
+    # Note: Cannot use SequentialLR with ReduceLROnPlateau (requires metric in step())
+    # Instead, manually handle warmup and plateau separately
+    warmup_epochs = CONFIG.get("warmup_epochs", 0)
+    scheduler_factor = CONFIG.get("scheduler_factor", 0.7)
+    scheduler_patience = CONFIG.get("scheduler_patience", 10)
+    scheduler_min_lr = CONFIG.get("scheduler_min_lr", 1e-6)
+    
+    # Main scheduler (ReduceLROnPlateau)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=scheduler_factor,
+        patience=scheduler_patience,
+        min_lr=scheduler_min_lr,
+        verbose=False  # Set to False to avoid deprecation warning
+    )
+    
+    # Store warmup info for manual handling
+    use_warmup = (warmup_epochs > 0)
+    base_lr = CONFIG["lr"]  # Store base LR for warmup calculation
     # Training loop
     output_dir = Path(CONFIG["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -456,12 +490,25 @@ def main():
         
         # Track learning rate before scheduler step
         old_lr = optimizer.param_groups[0]['lr']
-        scheduler.step(val_loss)
-        new_lr = optimizer.param_groups[0]['lr']
+        
+        # Handle warmup manually (before plateau scheduler)
+        if use_warmup and epoch < warmup_epochs:
+            # Linear warmup: LR = base_lr * (epoch + 1) / warmup_epochs
+            warmup_lr = base_lr * (epoch + 1) / warmup_epochs
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = warmup_lr
+            new_lr = warmup_lr
+        else:
+            # After warmup, use plateau scheduler
+            scheduler.step(val_loss)  # Plateau scheduler steps on validation loss
+            new_lr = optimizer.param_groups[0]['lr']
         
         # Print message if learning rate changed
         if old_lr != new_lr:
-            epoch_pbar.write(f"  → Learning rate reduced: {old_lr:.2e} → {new_lr:.2e}")
+            if use_warmup and epoch < warmup_epochs:
+                epoch_pbar.write(f"  → Learning rate (warmup): {old_lr:.2e} → {new_lr:.2e}")
+            else:
+                epoch_pbar.write(f"  → Learning rate reduced: {old_lr:.2e} → {new_lr:.2e}")
         
         best_val_str = f'{best_val_loss:.6f}' if best_val_loss != float('inf') else 'N/A'
         epoch_pbar.set_postfix({

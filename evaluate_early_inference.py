@@ -25,11 +25,11 @@ CONFIG = {
     # Model and data paths
     "model_path": r"C:\Users\vt4ho\Simulations\simulation_data\models\imperfect\models_early_inference_50000_30s\best_model_prefix_30s.pt",
     "data_dir": r"C:\Users\vt4ho\Simulations\simulation_data\generated_data\imperfect\Generated_Data_EarlyInference_50000",
-    "output_dir":  r"C:\Users\vt4ho\Simulations\simulation_data\evaluation\imperfect\evaluation_early_inference_50000_30s",
+    "output_dir":  r"C:\Users\vt4ho\Simulations\simulation_data\evaluation\imperfect\evaluation_early_inference_50000_300s",
     
     # Evaluation parameters
     "n_test_samples": 100,              # Number of test cases
-    "prefix_length": 30.0,              # Length of prefix to reveal [s]
+    "prefix_length": 300.0,              # Length of prefix to reveal [s]
     "t_max": 2000.0,                    # Full trajectory length [s] (should match data generation)
     "reference_grid_dt": 5.0,           # Reference grid spacing [s] for fair comparison (uniform)
     "device": "auto",
@@ -38,11 +38,11 @@ CONFIG = {
     # Parameter fitting bounds (unified: E0_g_per_L and k_d only)
     "fit_bounds": {
         "E0_g_per_L": (5e-2, 1.25),  # Wide range covering slow to fast regimes [g/L]
-        "k_d": (0.00001, 5e-3),
+        "k_d": (1e-5, 5e-3),
     },
     
     # Part C: Fitting configuration
-    "fit_nuisance_params": False,  # If True, fit nuisance parameters; if False, use ground truth (fairer comparison)
+    "fit_nuisance_params": True,  # If True, fit nuisance parameters; if False, use ground truth (fairer comparison)
 }
 
 
