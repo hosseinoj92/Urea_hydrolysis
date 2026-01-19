@@ -68,12 +68,22 @@ def fit_mechanistic_parameters(
             'k_d': (0.0, 5e-3),                   # Deactivation rate [1/s]
         }
     
-    # Default initial guess
+    # Default initial guess (ensure it's within bounds)
     if initial_guess is None:
+        # Get bounds to ensure initial guess is valid
+        default_powder_bounds = param_bounds.get('powder_activity_frac', (0.01, 1.0))
+        default_kd_bounds = param_bounds.get('k_d', (0.0, 5e-3))
+        
+        # Use midpoint of bounds for initial guess
         initial_guess = {
-            'powder_activity_frac': 0.5,  # 50% active (more reasonable starting point, matches notebook better)
-            'k_d': 0.0,                   # Start with no deactivation (matches notebook)
+            'powder_activity_frac': 0.5 * (default_powder_bounds[0] + default_powder_bounds[1]),  # Midpoint
+            'k_d': max(default_kd_bounds[0], 1e-5),  # Use lower bound (but at least 1e-5 if bounds start at 0)
         }
+        # Ensure initial guess is within bounds
+        initial_guess['powder_activity_frac'] = np.clip(initial_guess['powder_activity_frac'], 
+                                                         default_powder_bounds[0], default_powder_bounds[1])
+        initial_guess['k_d'] = np.clip(initial_guess['k_d'], 
+                                       default_kd_bounds[0], default_kd_bounds[1])
     
     # Part B: Default nuisance parameter bounds and guesses
     if fit_nuisance_params:
@@ -276,7 +286,10 @@ def fit_mechanistic_parameters(
         else:
             bounds_lower.append(-np.inf)
             bounds_upper.append(np.inf)
-    bounds = (bounds_lower, bounds_upper)
+    bounds = (np.array(bounds_lower), np.array(bounds_upper))
+    
+    # Ensure initial guess is within bounds (clip to valid range)
+    x0 = np.clip(x0, bounds[0], bounds[1])
     
     # Optimize with robust loss (similar to notebook)
     # Use 'soft_l1' robust loss to handle outliers better

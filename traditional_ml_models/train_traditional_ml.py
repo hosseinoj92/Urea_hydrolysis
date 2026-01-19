@@ -49,12 +49,12 @@ CONFIG = {
     "prefix_length": 30.0,  # Which prefix length to train on
     
     # Model selection (set to True to train, False to skip)
-    "train_gpr": True,
-    "train_xgboost": True,
-    "train_lightgbm": True,
-    "train_catboost": True,
-    "train_random_forest": True,
-    "train_extra_trees": True,
+    "train_gpr": False,
+    "train_xgboost": False,
+    "train_lightgbm": False,
+    "train_catboost": False,
+    "train_random_forest": False,
+    "train_extra_trees": False,
     "train_mlp": True,
     
     # Training parameters
@@ -113,7 +113,7 @@ CONFIG = {
         "solver": "adam",
         "alpha": 1e-4,  # L2 regularization
         "learning_rate": "adaptive",
-        "max_iter": 500,
+        "max_iter": 2000,
         "early_stopping": True,
         "validation_fraction": 0.1,
         "random_state": 42,
@@ -294,11 +294,17 @@ def train_gpr(X_train, y_train, config: dict, pbar=None):
 
 def train_xgboost(X_train, y_train, config: dict, pbar=None):
     """Train XGBoost model with multi-output support."""
-    if pbar:
-        pbar.set_description("Training XGBoost")
-        pbar.write("  Fitting XGBoost (multi-output)...")
+    import threading
+    import time as time_module
     
     n_estimators = config.get("n_estimators", 500)
+    
+    if pbar:
+        pbar.set_description("Training XGBoost")
+        pbar.total = n_estimators
+        pbar.unit = "trees"
+        pbar.n = 0
+        pbar.refresh()
     
     # XGBoost base model (single output)
     base_model = xgb.XGBRegressor(
@@ -315,22 +321,54 @@ def train_xgboost(X_train, y_train, config: dict, pbar=None):
     # Wrap in MultiOutputRegressor for multi-output support
     model = MultiOutputRegressor(base_model, n_jobs=config.get("n_jobs", -1))
     
+    # Estimate progress based on time (since MultiOutputRegressor doesn't expose callbacks)
+    if pbar:
+        start_time = time_module.time()
+        progress_done = threading.Event()
+        
+        def update_progress():
+            while not progress_done.is_set():
+                elapsed = time_module.time() - start_time
+                # Estimate: assume linear progress (rough approximation)
+                # For 2 outputs, training takes roughly 2x time
+                estimated_time_per_tree = 0.1  # Rough estimate, will be refined
+                if elapsed > 1.0:  # After 1 second, refine estimate
+                    estimated_time_per_tree = elapsed / (n_estimators * 2)  # 2 outputs
+                
+                estimated_trees = min(int(elapsed / max(estimated_time_per_tree, 1e-6)), n_estimators)
+                if pbar:
+                    pbar.n = estimated_trees
+                    pbar.set_postfix({"trees": f"{estimated_trees}/{n_estimators}"})
+                    pbar.refresh()
+                progress_done.wait(0.5)  # Update every 0.5 seconds
+        
+        progress_thread = threading.Thread(target=update_progress, daemon=True)
+        progress_thread.start()
+    
     model.fit(X_train, y_train)
     
     if pbar:
+        progress_done.set()
+        pbar.n = n_estimators
         pbar.set_postfix({"trees": f"{n_estimators}/{n_estimators}"})
-        pbar.update(1)
+        pbar.update(0)  # Refresh display
     
     return model
 
 
 def train_lightgbm(X_train, y_train, config: dict, pbar=None):
     """Train LightGBM model with multi-output support."""
-    if pbar:
-        pbar.set_description("Training LightGBM")
-        pbar.write("  Fitting LightGBM (multi-output)...")
+    import threading
+    import time as time_module
     
     n_estimators = config.get("n_estimators", 500)
+    
+    if pbar:
+        pbar.set_description("Training LightGBM")
+        pbar.total = n_estimators
+        pbar.unit = "trees"
+        pbar.n = 0
+        pbar.refresh()
     
     # LightGBM base model (single output)
     base_model = lgb.LGBMRegressor(
@@ -347,25 +385,55 @@ def train_lightgbm(X_train, y_train, config: dict, pbar=None):
     # Wrap in MultiOutputRegressor for multi-output support
     model = MultiOutputRegressor(base_model, n_jobs=config.get("n_jobs", -1))
     
+    # Estimate progress based on time
+    if pbar:
+        start_time = time_module.time()
+        progress_done = threading.Event()
+        
+        def update_progress():
+            while not progress_done.is_set():
+                elapsed = time_module.time() - start_time
+                estimated_time_per_tree = 0.05  # Rough estimate
+                if elapsed > 1.0:
+                    estimated_time_per_tree = elapsed / (n_estimators * 2)
+                
+                estimated_trees = min(int(elapsed / max(estimated_time_per_tree, 1e-6)), n_estimators)
+                if pbar:
+                    pbar.n = estimated_trees
+                    pbar.set_postfix({"trees": f"{estimated_trees}/{n_estimators}"})
+                    pbar.refresh()
+                progress_done.wait(0.5)
+        
+        progress_thread = threading.Thread(target=update_progress, daemon=True)
+        progress_thread.start()
+    
     model.fit(X_train, y_train)
     
     if pbar:
+        progress_done.set()
+        pbar.n = n_estimators
         pbar.set_postfix({"trees": f"{n_estimators}/{n_estimators}"})
-        pbar.update(1)
+        pbar.update(0)
     
     return model
 
 
 def train_catboost(X_train, y_train, config: dict, pbar=None):
     """Train CatBoost model with multi-output support."""
+    import threading
+    import time as time_module
+    
     if not CATBOOST_AVAILABLE:
         raise ImportError("CatBoost not available. Install with: pip install catboost")
     
+    iterations = config.get("iterations", 500)
+    
     if pbar:
         pbar.set_description("Training CatBoost")
-        pbar.write("  Fitting CatBoost (multi-output)...")
-    
-    iterations = config.get("iterations", 500)
+        pbar.total = iterations
+        pbar.unit = "iter"
+        pbar.n = 0
+        pbar.refresh()
     
     # CatBoost base model (single output)
     base_model = cb.CatBoostRegressor(
@@ -378,25 +446,54 @@ def train_catboost(X_train, y_train, config: dict, pbar=None):
     )
     
     # Wrap in MultiOutputRegressor for multi-output support
-    # Note: CatBoost supports multi-output natively, but MultiOutputRegressor is more compatible
     model = MultiOutputRegressor(base_model, n_jobs=config.get("n_jobs", -1))
+    
+    # Estimate progress based on time
+    if pbar:
+        start_time = time_module.time()
+        progress_done = threading.Event()
+        
+        def update_progress():
+            while not progress_done.is_set():
+                elapsed = time_module.time() - start_time
+                estimated_time_per_iter = 0.05
+                if elapsed > 1.0:
+                    estimated_time_per_iter = elapsed / (iterations * 2)
+                
+                estimated_iters = min(int(elapsed / max(estimated_time_per_iter, 1e-6)), iterations)
+                if pbar:
+                    pbar.n = estimated_iters
+                    pbar.set_postfix({"iter": f"{estimated_iters}/{iterations}"})
+                    pbar.refresh()
+                progress_done.wait(0.5)
+        
+        progress_thread = threading.Thread(target=update_progress, daemon=True)
+        progress_thread.start()
     
     model.fit(X_train, y_train)
     
     if pbar:
-        pbar.set_postfix({"iterations": f"{iterations}/{iterations}"})
-        pbar.update(1)
+        progress_done.set()
+        pbar.n = iterations
+        pbar.set_postfix({"iter": f"{iterations}/{iterations}"})
+        pbar.update(0)
     
     return model
 
 
 def train_random_forest(X_train, y_train, config: dict, pbar=None):
     """Train Random Forest model."""
-    if pbar:
-        pbar.set_description("Training Random Forest")
-        pbar.write("  Fitting Random Forest (this may take a while)...")
+    import threading
+    import time as time_module
     
     n_estimators = config.get("n_estimators", 500)
+    
+    if pbar:
+        pbar.set_description("Training Random Forest")
+        pbar.total = n_estimators
+        pbar.unit = "trees"
+        pbar.n = 0
+        pbar.refresh()
     
     model = RandomForestRegressor(
         n_estimators=n_estimators,
@@ -408,22 +505,52 @@ def train_random_forest(X_train, y_train, config: dict, pbar=None):
         verbose=0,
     )
     
+    # Estimate progress based on time
+    if pbar:
+        start_time = time_module.time()
+        progress_done = threading.Event()
+        
+        def update_progress():
+            while not progress_done.is_set():
+                elapsed = time_module.time() - start_time
+                estimated_time_per_tree = 0.1
+                if elapsed > 1.0:
+                    estimated_time_per_tree = elapsed / n_estimators
+                
+                estimated_trees = min(int(elapsed / max(estimated_time_per_tree, 1e-6)), n_estimators)
+                if pbar:
+                    pbar.n = estimated_trees
+                    pbar.set_postfix({"trees": f"{estimated_trees}/{n_estimators}"})
+                    pbar.refresh()
+                progress_done.wait(0.5)
+        
+        progress_thread = threading.Thread(target=update_progress, daemon=True)
+        progress_thread.start()
+    
     model.fit(X_train, y_train)
     
     if pbar:
+        progress_done.set()
+        pbar.n = n_estimators
         pbar.set_postfix({"trees": f"{n_estimators}/{n_estimators}"})
-        pbar.update(1)
+        pbar.update(0)
     
     return model
 
 
 def train_extra_trees(X_train, y_train, config: dict, pbar=None):
     """Train Extra Trees model."""
-    if pbar:
-        pbar.set_description("Training Extra Trees")
-        pbar.write("  Fitting Extra Trees (this may take a while)...")
+    import threading
+    import time as time_module
     
     n_estimators = config.get("n_estimators", 500)
+    
+    if pbar:
+        pbar.set_description("Training Extra Trees")
+        pbar.total = n_estimators
+        pbar.unit = "trees"
+        pbar.n = 0
+        pbar.refresh()
     
     model = ExtraTreesRegressor(
         n_estimators=n_estimators,
@@ -435,42 +562,114 @@ def train_extra_trees(X_train, y_train, config: dict, pbar=None):
         verbose=0,
     )
     
+    # Estimate progress based on time
+    if pbar:
+        start_time = time_module.time()
+        progress_done = threading.Event()
+        
+        def update_progress():
+            while not progress_done.is_set():
+                elapsed = time_module.time() - start_time
+                estimated_time_per_tree = 0.1
+                if elapsed > 1.0:
+                    estimated_time_per_tree = elapsed / n_estimators
+                
+                estimated_trees = min(int(elapsed / max(estimated_time_per_tree, 1e-6)), n_estimators)
+                if pbar:
+                    pbar.n = estimated_trees
+                    pbar.set_postfix({"trees": f"{estimated_trees}/{n_estimators}"})
+                    pbar.refresh()
+                progress_done.wait(0.5)
+        
+        progress_thread = threading.Thread(target=update_progress, daemon=True)
+        progress_thread.start()
+    
     model.fit(X_train, y_train)
     
     if pbar:
+        progress_done.set()
+        pbar.n = n_estimators
         pbar.set_postfix({"trees": f"{n_estimators}/{n_estimators}"})
-        pbar.update(1)
+        pbar.update(0)
     
     return model
 
 
 def train_mlp(X_train, y_train, config: dict, pbar=None):
-    """Train Multi-layer Perceptron."""
+    """
+    Train Multi-layer Perceptron with iteration tracking.
+    
+    Uses warm_start to train in chunks and show real progress.
+    """
+    max_iter = config.get("max_iter", 500)
+    chunk_size = 50  # Train in chunks of 50 iterations (larger to avoid convergence warnings)
+    
     if pbar:
         pbar.set_description("Training MLP")
+        pbar.total = max_iter
+        pbar.unit = "iter"
+        pbar.n = 0
+        pbar.refresh()
     
-    # MLP has verbose option but it's not very informative
-    # We'll enable it and capture output, or just show a message
-    if pbar:
-        pbar.write("  Fitting MLP (this may take a while)...")
-    
+    # Use warm_start to train in chunks and track progress
+    # Start with a reasonable max_iter to avoid convergence warnings
     model = MLPRegressor(
         hidden_layer_sizes=config.get("hidden_layer_sizes", (256, 128, 64)),
         activation=config.get("activation", "relu"),
         solver=config.get("solver", "adam"),
         alpha=config.get("alpha", 1e-4),
-        learning_rate=config.get("learning_rate", "adaptive"),
-        max_iter=config.get("max_iter", 500),
+        learning_rate=config.get("learning_rate", "adaptive"),  # See explanation below
+        max_iter=chunk_size,  # Will be updated in chunks
         early_stopping=config.get("early_stopping", True),
         validation_fraction=config.get("validation_fraction", 0.1),
         random_state=config.get("random_state", 42),
-        verbose=False,  # Keep False to avoid clutter
+        warm_start=True,  # Enable warm start for chunk training
+        verbose=False,
     )
     
-    model.fit(X_train, y_train)
+    # Train in chunks to show progress
+    total_trained = 0
+    n_chunks = (max_iter + chunk_size - 1) // chunk_size
     
+    for chunk in range(n_chunks):
+        # Determine how many iterations for this chunk
+        remaining = max_iter - total_trained
+        if remaining <= 0:
+            break
+        
+        iterations_this_chunk = min(chunk_size, remaining)
+        model.max_iter = iterations_this_chunk
+        
+        # Train this chunk
+        model.fit(X_train, y_train)
+        
+        # Get actual iterations trained (may be less if converged early)
+        actual_iters_this_chunk = getattr(model, 'n_iter_', iterations_this_chunk)
+        total_trained += actual_iters_this_chunk
+        
+        # Update progress
+        if pbar:
+            pbar.n = total_trained
+            pbar.set_postfix({"iter": f"{total_trained}/{max_iter}"})
+            pbar.refresh()
+        
+        # Check if training stopped early (converged or early stopping)
+        if actual_iters_this_chunk < iterations_this_chunk:
+            # Training converged or stopped early
+            if pbar:
+                pbar.set_postfix({"iter": f"{total_trained}/{max_iter} (converged)"})
+                pbar.refresh()
+            break
+        
+        if total_trained >= max_iter:
+            break
+    
+    # Final update
     if pbar:
-        pbar.update(1)
+        actual_iters = getattr(model, 'n_iter_', total_trained)
+        pbar.n = actual_iters
+        pbar.set_postfix({"iter": f"{actual_iters}/{max_iter}"})
+        pbar.update(0)
     
     return model
 
@@ -576,9 +775,10 @@ def main():
             overall_pbar.set_description(f"Training {model_name:15s}")
             
             # Create individual model progress bar (nested)
-            model_pbar = tqdm(total=1, desc=f"  {model_name:15s}", unit="", 
+            # Will be updated by training function with actual total
+            model_pbar = tqdm(total=100, desc=f"  {model_name:15s}", unit="", 
                             position=1, leave=False, ncols=120,
-                            bar_format='{desc}: {bar}| {elapsed}<{remaining}')
+                            bar_format='{desc}: {bar}| {n_fmt}/{total_fmt} {unit} [{elapsed}<{remaining}]')
             
             start_time = time.time()
             model = train_func(X_train_data, y_train, model_config, pbar=model_pbar)

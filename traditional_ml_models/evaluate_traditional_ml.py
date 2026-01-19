@@ -260,9 +260,17 @@ def evaluate_single_case(
     else:
         features_scaled = features_2d  # Already 2D
     
-    # Predict with all models
+    # Predict with all models (with progress bar)
     model_predictions = {}
-    for model_name, model in models.items():
+    model_list = list(models.items())
+    
+    # Create progress bar for model predictions
+    pred_pbar = tqdm(total=len(model_list), desc="  Predicting", unit="model", 
+                    position=1, leave=False, ncols=120,
+                    bar_format='{desc}: {bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+    
+    for model_name, model in model_list:
+        pred_pbar.set_description(f"  Predicting {model_name}")
         try:
             # Determine if model needs scaled features
             use_scaled = model_name in ["gpr", "mlp"]
@@ -350,6 +358,10 @@ def evaluate_single_case(
                 "powder_activity_frac": np.nan,
                 "k_d": np.nan,
             }
+        
+        pred_pbar.update(1)
+    
+    pred_pbar.close()
     
     # Mechanistic fitting
     try:

@@ -68,12 +68,22 @@ def fit_mechanistic_parameters(
             'k_d': (0.0, 5e-3),                   # Deactivation rate [1/s]
         }
     
-    # Default initial guess
+    # Default initial guess (ensure it's within bounds)
     if initial_guess is None:
+        # Get bounds to ensure initial guess is valid
+        default_powder_bounds = param_bounds.get('powder_activity_frac', (0.01, 1.0))
+        default_kd_bounds = param_bounds.get('k_d', (0.0, 5e-3))
+        
+        # Use midpoint of bounds for initial guess
         initial_guess = {
-            'powder_activity_frac': 0.1,  # 10% active (reasonable mid-range value)
-            'k_d': 0.001,                 # Small deactivation
+            'powder_activity_frac': 0.5 * (default_powder_bounds[0] + default_powder_bounds[1]),  # Midpoint
+            'k_d': max(default_kd_bounds[0], 1e-5),  # Use lower bound (but at least 1e-5 if bounds start at 0)
         }
+        # Ensure initial guess is within bounds
+        initial_guess['powder_activity_frac'] = np.clip(initial_guess['powder_activity_frac'], 
+                                                         default_powder_bounds[0], default_powder_bounds[1])
+        initial_guess['k_d'] = np.clip(initial_guess['k_d'], 
+                                       default_kd_bounds[0], default_kd_bounds[1])
     
     # Part B: Default nuisance parameter bounds and guesses
     if fit_nuisance_params:
@@ -158,6 +168,12 @@ def fit_mechanistic_parameters(
     t_sorted = t_measured[sort_idx]
     pH_measured_sorted = pH_measured[sort_idx]
     
+    # Time weighting parameters (emphasize early times for better parameter estimation)
+    # Similar to notebook: weight = 1 / (1 + (t/t_weight)^power)
+    t_weight = 400.0  # seconds where weight ~1/2
+    weight_power = 2.0  # larger → more emphasis on early data
+    time_weights = 1.0 / (1.0 + (np.maximum(t_sorted, 0.0) / max(t_weight, 1e-12)) ** weight_power)
+    
     def residual(params_vec):
         """
         Residual function for optimization.
@@ -203,27 +219,22 @@ def fit_mechanistic_parameters(
                 enable_mixing_ramp=enable_mixing_ramp,
             )
             
-            # Part B: Integral-based objective (insensitive to sampling density)
-            # Instead of sum of squared errors, use integral of squared error
-            # This approximates continuous-time error and doesn't favor dense sampling
+            # Compute residuals with time weighting (emphasize early times)
+            # This is critical for parameter estimation - early dynamics are most informative
+            error = pH_sim - pH_measured_sorted
+            
             if use_integral_objective and len(t_sorted) > 1:
-                # Compute squared error
-                error_sq = (pH_sim - pH_measured_sorted) ** 2
-                # Integrate using trapezoidal rule
-                # This gives error^2 * dt, which approximates continuous-time integral
-                # Use numpy.trapz (scipy.integrate.trapz was deprecated/removed in newer SciPy)
-                error_integral = np.trapz(error_sq, t_sorted)
-                # Convert to pointwise residual by taking square root and normalizing
-                # This preserves the least-squares structure while being density-insensitive
-                # We normalize by sqrt(dt_avg) to make units consistent
-                dt_avg = (t_sorted[-1] - t_sorted[0]) / (len(t_sorted) - 1) if len(t_sorted) > 1 else 1.0
-                # Residual per point: sqrt(integral / n_points) approximates RMS
+                # Weighted integral-based objective
+                # Weight the squared error by time weights, then integrate
+                weighted_error_sq = time_weights * (error ** 2)
+                error_integral = np.trapz(weighted_error_sq, t_sorted)
+                # Convert to pointwise residual (density-insensitive but time-weighted)
                 res_per_point = np.sqrt(error_integral / len(t_sorted))
-                # Return as vector of residuals (one per point, but density-insensitive)
                 res = np.full_like(pH_measured_sorted, res_per_point)
             else:
-                # Fallback: pointwise residual (original behavior)
-                res = pH_sim - pH_measured_sorted
+                # Weighted pointwise residuals (matches notebook approach)
+                # Apply sqrt(weight) to residuals to emphasize early times
+                res = np.sqrt(time_weights) * error
             
             # Part B: Add regularization terms for nuisance parameters
             # This prevents nuisance factors from freely compensating for kinetics parameters
@@ -275,17 +286,24 @@ def fit_mechanistic_parameters(
         else:
             bounds_lower.append(-np.inf)
             bounds_upper.append(np.inf)
-    bounds = (bounds_lower, bounds_upper)
+    bounds = (np.array(bounds_lower), np.array(bounds_upper))
     
-    # Optimize
+    # Ensure initial guess is within bounds (clip to valid range)
+    x0 = np.clip(x0, bounds[0], bounds[1])
+    
+    # Optimize with robust loss (similar to notebook)
+    # Use 'soft_l1' robust loss to handle outliers better
     result = least_squares(
         residual,
         x0,
         bounds=bounds,
         method='trf',  # Trust Region Reflective
         max_nfev=1000,
-        ftol=1e-6,
-        xtol=1e-6,
+        ftol=1e-8,  # Tighter tolerance (matches notebook)
+        xtol=1e-8,  # Tighter tolerance (matches notebook)
+        gtol=1e-8,  # Gradient tolerance (matches notebook)
+        loss='soft_l1',  # Robust loss function (handles outliers)
+        f_scale=0.03,  # Scale parameter for robust loss (pH units, matches notebook)
     )
     
     # Convert result to dict

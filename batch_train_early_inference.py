@@ -20,20 +20,20 @@ from train_early_inference import main as train_main, CONFIG as BASE_CONFIG
 # ╚══════════════════════════════════════════════════════════════╝
 
 # Base data directory
-BASE_DATA_DIR = r"C:\Users\vt4ho\Simulations\simulation_data\generated_data\imperfect\version_2\Generated_Data_EarlyInference_100000"
-BASE_OUTPUT_DIR = r"C:\Users\vt4ho\Simulations\simulation_data\models\imperfect\version_2\batch_ML_training_models"
+BASE_DATA_DIR = r"C:\Users\vt4ho\Simulations\simulation_data\generated_data\imperfect\version_experiment\Generated_Data_EarlyInference_50000"
+BASE_OUTPUT_DIR = r"C:\Users\vt4ho\Simulations\simulation_data\models\imperfect\version_experiment\batch_ML_training_models"
 
 # Define parameter variations
 TRAINING_CONFIGS = {
     # Prefix lengths to train on
-    "prefix_lengths": [30.0, 120.0],
+    "prefix_lengths": [30.0, 300.0],
     
     # Training hyperparameters variations
     "batch_sizes": [512],
     "learning_rates": [2e-3],
     "epochs": [1000],
     "early_stopping_patience": [20],
-    "warmup_epochs": [0, 5],  # Test with/without warmup
+    "warmup_epochs": [0],  # Test with/without warmup
     
     # Model architecture variations
     "tcn_channels": [
@@ -43,8 +43,8 @@ TRAINING_CONFIGS = {
     "tcn_kernel_sizes": [7],
     
     # Optional features
-    "use_weighted_pooling": [False, True],  # Test both pooling methods
-    "use_variance_regularization": [False, True],  # Test with/without variance reg
+    "use_weighted_pooling": [False],  # Test both pooling methods
+    "use_variance_regularization": [True],  # Test with/without variance reg
 }
 
 # Fixed parameters (same for all runs)
