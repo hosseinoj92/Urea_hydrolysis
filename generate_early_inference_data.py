@@ -48,12 +48,27 @@ CONFIG = {
     ],
     
     # Parameter sampling ranges (known inputs - exactly 4 sampled + 1 fixed)
+    # 
+    # Each parameter can be specified in three formats:
+    #   1. Uniform range: (min, max) or [min, max] -> samples uniformly from range
+    #   2. Fixed value: single number -> uses same value for all samples
+    #   3. Discrete list: [v1, v2, ...] -> randomly samples from list (must have 3+ elements)
+    # 
+    # Examples:
+    #   "temperature_C": [25.0, 40.0]           # Uniform range (default)
+    #   "temperature_C": 30.0                   # Fixed value for all samples
+    #   "temperature_C": [25.0, 30.0, 35.0, 40.0]  # Discrete values (randomly sampled)
+    # 
+    # Note: Lists with exactly 2 elements are treated as uniform ranges [min, max]
+    #       Lists with 3+ elements are treated as discrete value lists
     "param_ranges": {
         # Physical conditions (sampled)
-        "substrate_mM": [10.0, 100.0],
-        "grams_urease_powder": [0.01, 0.1],
-        "temperature_C": [25.0, 40.0],
-        "initial_pH": [6.5, 7.5],
+        "substrate_mM": [10.0, 100.0],  # Uniform range: [min, max]
+        "grams_urease_powder": [0.01, 0.1],  # Uniform range: [min, max]
+        "temperature_C": [25.0, 40.0],  # Uniform range: [min, max]
+        # Example: To use fixed temperature, change to: "temperature_C": 30.0
+        # Example: To use discrete temperatures, change to: "temperature_C": [25.0, 30.0, 35.0, 40.0]
+        "initial_pH": [6.5, 7.5],  # Uniform range: [min, max]
         # volume_L is fixed (see fixed_params below) - NOT sampled
         
         # Latent parameters to infer (unified: E0_g_per_L and k_d only)
@@ -107,7 +122,19 @@ def sample_parameters(n_samples: int, seed: int = 42) -> dict:
     """
     Sample parameter vectors for full trajectories.
     
+    Supports three parameter specification formats:
+    1. Uniform range: (min, max) -> samples uniformly from [min, max]
+    2. Fixed value: single number -> uses same value for all samples
+    3. Discrete list: [v1, v2, ...] -> randomly samples from list
+    
     Fixed parameters (e.g., volume_L) are included with constant values.
+    
+    Parameters
+    ----------
+    n_samples: int
+        Number of parameter vectors to sample
+    seed: int
+        Random seed for reproducibility
     
     Returns
     -------
@@ -117,9 +144,25 @@ def sample_parameters(n_samples: int, seed: int = 42) -> dict:
     
     params = {}
     # Sample parameters from param_ranges
-    for param_name, (lo, hi) in CONFIG["param_ranges"].items():
+    for param_name, param_spec in CONFIG["param_ranges"].items():
         if param_name not in CONFIG.get("fixed_params", {}):
-            params[param_name] = rng.uniform(lo, hi, n_samples)
+            # Check format and sample accordingly
+            if isinstance(param_spec, (list, tuple, np.ndarray)):
+                if len(param_spec) == 2 and isinstance(param_spec[0], (int, float)) and isinstance(param_spec[1], (int, float)):
+                    # Format 1: Uniform range (min, max)
+                    lo, hi = param_spec
+                    params[param_name] = rng.uniform(lo, hi, n_samples)
+                else:
+                    # Format 3: Discrete list [v1, v2, ...]
+                    param_spec = np.array(param_spec)
+                    indices = rng.integers(0, len(param_spec), n_samples)
+                    params[param_name] = param_spec[indices]
+            elif isinstance(param_spec, (int, float)):
+                # Format 2: Fixed value
+                params[param_name] = np.full(n_samples, param_spec)
+            else:
+                raise ValueError(f"Invalid parameter specification for {param_name}: {param_spec}. "
+                               f"Must be (min, max) tuple, single value, or list of values.")
     
     # Add fixed parameters (constant across all samples)
     for param_name, fixed_value in CONFIG.get("fixed_params", {}).items():
