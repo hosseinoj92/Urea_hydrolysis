@@ -175,6 +175,7 @@ class EarlyInferenceModel(nn.Module):
         mlp_hidden_dims: list = [128, 64],
         output_dropout: float = 0.1,
         use_uncertainty: bool = True,
+        use_weighted_pooling: bool = False,  # Option to use weighted temporal pooling
     ):
         super(EarlyInferenceModel, self).__init__()
         
@@ -193,11 +194,15 @@ class EarlyInferenceModel(nn.Module):
             dropout=tcn_dropout,
         )
         tcn_output_dim = tcn_channels[-1]
+        self.use_weighted_pooling = use_weighted_pooling
         
-        # Weighted pooling that emphasizes early-time information
-        # This helps with longer prefixes where early signal gets diluted
-        # Instead of simple average, use learnable weights that can emphasize early points
-        self.pool = WeightedTemporalPooling(tcn_output_dim, seq_length)
+        # Pooling over sequence dimension (optional: weighted or simple average)
+        if use_weighted_pooling:
+            # Weighted pooling that emphasizes early-time information
+            self.pool = WeightedTemporalPooling(tcn_output_dim, seq_length)
+        else:
+            # Global pooling over sequence dimension
+            self.pool = nn.AdaptiveAvgPool1d(1)  # (batch, tcn_output_dim, 1)
         
         # MLP for known inputs
         mlp_layers = []
@@ -272,7 +277,10 @@ class EarlyInferenceModel(nn.Module):
         seq_input = torch.cat([pH_seq, t_seq, dt_padded], dim=1)  # (batch, 3, seq_len)
         
         tcn_out = self.tcn(seq_input)  # (batch, tcn_channels[-1], seq_len)
-        tcn_pooled = self.pool(tcn_out)  # (batch, tcn_channels[-1]) - weighted pooling
+        if self.use_weighted_pooling:
+            tcn_pooled = self.pool(tcn_out)  # (batch, tcn_channels[-1]) - weighted pooling
+        else:
+            tcn_pooled = self.pool(tcn_out).squeeze(-1)  # (batch, tcn_channels[-1]) - simple average
         
         # Process known inputs with MLP
         mlp_out = self.mlp(known_inputs)  # (batch, mlp_output_dim)
@@ -348,6 +356,7 @@ def create_early_inference_model(
     mlp_hidden_dims: list = [128, 64],
     output_dropout: float = 0.1,
     use_uncertainty: bool = True,
+    use_weighted_pooling: bool = False,  # Option to use weighted temporal pooling
 ) -> EarlyInferenceModel:
     """
     Create early inference model.
@@ -363,6 +372,7 @@ def create_early_inference_model(
     mlp_hidden_dims: hidden dimensions for MLP processing known inputs
     output_dropout: dropout rate for output head
     use_uncertainty: if True, output mean and log-variance
+    use_weighted_pooling: if True, use learnable attention-based pooling instead of simple average
     
     Returns
     -------
@@ -378,12 +388,16 @@ def create_early_inference_model(
         mlp_hidden_dims=mlp_hidden_dims,
         output_dropout=output_dropout,
         use_uncertainty=use_uncertainty,
+        use_weighted_pooling=use_weighted_pooling,
     )
     return model
 
 
 def gaussian_nll_loss(mean: torch.Tensor, logvar: torch.Tensor, 
-                     target: torch.Tensor) -> torch.Tensor:
+                     target: torch.Tensor, 
+                     use_variance_regularization: bool = False,
+                     variance_penalty_weight: float = 0.01,
+                     target_variance: float = 0.1) -> torch.Tensor:
     """
     Gaussian negative log-likelihood loss.
     
@@ -394,6 +408,9 @@ def gaussian_nll_loss(mean: torch.Tensor, logvar: torch.Tensor,
     mean: (batch_size, n_params) predicted means
     logvar: (batch_size, n_params) predicted log-variances
     target: (batch_size, n_params) target values
+    use_variance_regularization: if True, adds penalty to encourage reasonable variance
+    variance_penalty_weight: weight for variance regularization penalty
+    target_variance: target variance value for regularization
     
     Returns
     -------
@@ -426,13 +443,13 @@ def gaussian_nll_loss(mean: torch.Tensor, logvar: torch.Tensor,
     # If it occasionally goes slightly negative, that's fine for optimization
     # (it just means model is very confident and correct)
     
-    # Add variance regularization to prevent variance collapse/explosion
-    # This helps with training stability and prevents the model from "cheating"
-    # by inflating variance to reduce loss
-    var = torch.exp(logvar)
-    # Penalize variance that's too small (< 0.01) or too large (> 1.0)
-    # Encourage variance around 0.1 (reasonable uncertainty)
-    target_var = 0.1
-    variance_penalty = 0.01 * torch.mean((var - target_var) ** 2)
+    loss = nll.mean()
     
-    return nll.mean() + variance_penalty
+    # Optional: Add variance regularization to prevent variance collapse/explosion
+    if use_variance_regularization:
+        var = torch.exp(logvar)
+        # Penalize variance that deviates from target
+        variance_penalty = variance_penalty_weight * torch.mean((var - target_variance) ** 2)
+        loss = loss + variance_penalty
+    
+    return loss

@@ -11,6 +11,8 @@ from pathlib import Path
 import json
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import time
+from datetime import timedelta
 
 from early_inference_model import create_early_inference_model, gaussian_nll_loss
 
@@ -20,15 +22,15 @@ from early_inference_model import create_early_inference_model, gaussian_nll_los
 CONFIG = {
     # Data paths
     "data_dir": r"C:\Users\vt4ho\Simulations\simulation_data\generated_data\imperfect\version_2\Generated_Data_EarlyInference_100000",
-    "output_dir": r"C:\Users\vt4ho\Simulations\simulation_data\models\imperfect\verion_2\models_early_inference_100000_30s",
+    "output_dir": r"C:\Users\vt4ho\Simulations\simulation_data\models\imperfect\version_2\models_early_inference_100000_30s",
     "prefix_length": 30.0,  # Which prefix length to train on (10, 30, or 60 seconds)
     
     # Training hyperparameters
     "batch_size": 512,  # Increased for better GPU utilization and stability
-    "epochs": 2000,
-    "lr": 8e-3,  # Increased and scaled with batch size (2x batch = 2x LR)
+    "epochs": 1000,
+    "lr": 5e-3,  # Increased and scaled with batch size (2x batch = 2x LR)
     "val_split": 0.2,
-    "early_stopping_patience": 50,
+    "early_stopping_patience": 100,
     "weight_decay": 1e-5,  # L2 regularization
     "grad_clip_norm": 5.0,  # Increased from 1.0 for better gradient flow
     
@@ -40,12 +42,18 @@ CONFIG = {
     
     # Model architecture
     # Increased depth to cover sequence length 300: [128, 256, 512, 512, 512] gives RF=373
-    "tcn_channels": [128, 256, 512, 512, 512],  # Added 5th level for RF >= 300
+    "tcn_channels": [128, 256, 512, 512],  # Added 5th level for RF >= 300
     "tcn_kernel_size": 7,
     "tcn_dropout": 0.2,
     "mlp_hidden_dims": [256, 128],
     "output_dropout": 0.1,
     "use_uncertainty": True,
+    
+    # Optional model features
+    "use_weighted_pooling": False,  # If True, use learnable attention-based pooling
+    "use_variance_regularization": False,  # If True, add variance penalty to loss
+    "variance_penalty_weight": 0.01,  # Weight for variance regularization
+    "target_variance": 0.1,  # Target variance for regularization
     
     # Training options
     "device": "auto",
@@ -189,7 +197,7 @@ class EarlyInferenceDataset(Dataset):
         }
 
 
-def train_epoch(model, dataloader, optimizer, criterion, device, use_uncertainty: bool, epoch: int, total_epochs: int):
+def train_epoch(model, dataloader, optimizer, criterion, device, use_uncertainty: bool, epoch: int, total_epochs: int, config: dict = None):
     """Train for one epoch."""
     model.train()
     total_loss = 0.0
@@ -209,7 +217,17 @@ def train_epoch(model, dataloader, optimizer, criterion, device, use_uncertainty
         # Forward pass - now includes time!
         if use_uncertainty:
             mean, logvar = model(pH_seq, t_seq, known_inputs)
-            loss = gaussian_nll_loss(mean, logvar, target_params)
+            # Get variance regularization settings from config parameter
+            if config is None:
+                # Fallback to global CONFIG if not provided (for standalone use)
+                config = CONFIG
+            use_var_reg = config.get("use_variance_regularization", False)
+            var_penalty_weight = config.get("variance_penalty_weight", 0.01)
+            target_var = config.get("target_variance", 0.1)
+            loss = gaussian_nll_loss(mean, logvar, target_params,
+                                    use_variance_regularization=use_var_reg,
+                                    variance_penalty_weight=var_penalty_weight,
+                                    target_variance=target_var)
         else:
             mean = model.predict(pH_seq, t_seq, known_inputs)
             loss = criterion(mean, target_params)
@@ -261,7 +279,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, use_uncertainty
     return total_loss / n_batches
 
 
-def validate(model, dataloader, criterion, device, use_uncertainty: bool, epoch: int, total_epochs: int):
+def validate(model, dataloader, criterion, device, use_uncertainty: bool, epoch: int, total_epochs: int, config: dict = None):
     """Validate model."""
     model.eval()
     total_loss = 0.0
@@ -279,7 +297,18 @@ def validate(model, dataloader, criterion, device, use_uncertainty: bool, epoch:
             
             if use_uncertainty:
                 mean, logvar = model(pH_seq, t_seq, known_inputs)  # Include time!
-                loss = gaussian_nll_loss(mean, logvar, target_params)
+                # Get variance regularization settings from config parameter
+                if config is None:
+                    # Fallback to global CONFIG if not provided
+                    from train_early_inference import CONFIG as fallback_config
+                    config = fallback_config
+                use_var_reg = config.get("use_variance_regularization", False)
+                var_penalty_weight = config.get("variance_penalty_weight", 0.01)
+                target_var = config.get("target_variance", 0.1)
+                loss = gaussian_nll_loss(mean, logvar, target_params,
+                                        use_variance_regularization=use_var_reg,
+                                        variance_penalty_weight=var_penalty_weight,
+                                        target_variance=target_var)
                 # D1: Check for negative loss (variance collapse/explosion)
                 if loss.item() < 0:
                     pbar.write(f"WARNING: Negative loss {loss.item():.6f}, logvar range: [{logvar.min():.4f}, {logvar.max():.4f}]")
@@ -299,11 +328,26 @@ def validate(model, dataloader, criterion, device, use_uncertainty: bool, epoch:
     return total_loss / n_batches
 
 
-def main():
+def main(config=None):
+    """
+    Main training function.
+    
+    Parameters
+    ----------
+    config: dict, optional
+        Configuration dictionary. If None, uses global CONFIG.
+    """
+    # Use provided config or fall back to global CONFIG
+    if config is None:
+        config = CONFIG
+    else:
+        # Update global CONFIG for functions that access it directly
+        CONFIG.update(config)
+    
     # Use CONFIG dictionary
-    data_dir = Path(CONFIG["data_dir"])
+    data_dir = Path(config["data_dir"])
     data_file = data_dir / "training_data.npz"
-    prefix_length = CONFIG["prefix_length"]
+    prefix_length = config["prefix_length"]
     
     if not data_file.exists():
         raise FileNotFoundError(f"Data file not found: {data_file}. Run generate_early_inference_data.py first.")
@@ -347,17 +391,17 @@ def main():
     assert np.all(target_params[:, 1] <= 0.01), f"k_d too large: max={target_params[:, 1].max():.6f}"
     
     # Device selection
-    if CONFIG["device"] == "auto":
+    if config["device"] == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
-        device = torch.device(CONFIG["device"])
+        device = torch.device(config["device"])
     print(f"Using device: {device}")
     
     # Train/val split (with fixed seed for reproducibility)
     n_samples = pH_prefix.shape[0]
-    n_train = int(n_samples * (1 - CONFIG["val_split"]))
+    n_train = int(n_samples * (1 - config["val_split"]))
     # Use fixed seed for reproducible train/val split
-    rng = np.random.default_rng(CONFIG.get("seed", 42))
+    rng = np.random.default_rng(config.get("seed", 42))
     indices = rng.permutation(n_samples)
     train_indices = indices[:n_train]
     val_indices = indices[n_train:]
@@ -376,14 +420,14 @@ def main():
     # Create datasets
     train_dataset = EarlyInferenceDataset(
         train_pH, train_t, train_known, train_targets,  # Use actual time grid!
-        normalize_inputs=CONFIG["normalize_inputs"],
-        normalize_outputs=CONFIG["normalize_outputs"],
+        normalize_inputs=config["normalize_inputs"],
+        normalize_outputs=config["normalize_outputs"],
     )
     
     val_dataset = EarlyInferenceDataset(
         val_pH, val_t, val_known, val_targets,  # Use actual time grid!
-        normalize_inputs=CONFIG["normalize_inputs"],
-        normalize_outputs=CONFIG["normalize_outputs"],
+        normalize_inputs=config["normalize_inputs"],
+        normalize_outputs=config["normalize_outputs"],
         input_stats={
             "pH_mean": train_dataset.pH_mean,
             "pH_std": train_dataset.pH_std,
@@ -398,8 +442,8 @@ def main():
         },
     )
     
-    train_loader = DataLoader(train_dataset, batch_size=CONFIG["batch_size"], shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=CONFIG["batch_size"], shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=config["batch_size"], shuffle=False)
     
     # Create model
     seq_length = train_pH.shape[1]
@@ -410,20 +454,21 @@ def main():
         seq_length=seq_length,
         n_known_inputs=n_known,
         n_output_params=n_params,
-        tcn_channels=CONFIG["tcn_channels"],
-        tcn_kernel_size=CONFIG["tcn_kernel_size"],
-        tcn_dropout=CONFIG["tcn_dropout"],
-        mlp_hidden_dims=CONFIG["mlp_hidden_dims"],
-        output_dropout=CONFIG["output_dropout"],
-        use_uncertainty=CONFIG["use_uncertainty"],
+        tcn_channels=config["tcn_channels"],
+        tcn_kernel_size=config["tcn_kernel_size"],
+        tcn_dropout=config["tcn_dropout"],
+        mlp_hidden_dims=config["mlp_hidden_dims"],
+        output_dropout=config["output_dropout"],
+        use_uncertainty=config["use_uncertainty"],
+        use_weighted_pooling=config.get("use_weighted_pooling", False),
     ).to(device)
     
     n_model_params = sum(p.numel() for p in model.parameters())
     print(f"Model created: {n_model_params:,} parameters")
     
     # E2: Check TCN receptive field is sufficient
-    kernel_size = CONFIG["tcn_kernel_size"]
-    num_levels = len(CONFIG["tcn_channels"])
+    kernel_size = config["tcn_kernel_size"]
+    num_levels = len(config["tcn_channels"])
     receptive_field = 1 + sum(2 * (kernel_size - 1) * (2 ** i) for i in range(num_levels))
     print(f"TCN receptive field: {receptive_field}, Sequence length: {seq_length}")
     if receptive_field < seq_length:
@@ -433,16 +478,16 @@ def main():
     
     # Loss and optimizer
     criterion = nn.MSELoss()
-    weight_decay = CONFIG.get("weight_decay", 0.0)
-    optimizer = optim.Adam(model.parameters(), lr=CONFIG["lr"], weight_decay=weight_decay)
+    weight_decay = config.get("weight_decay", 0.0)
+    optimizer = optim.Adam(model.parameters(), lr=config["lr"], weight_decay=weight_decay)
     
     # Learning rate scheduler with warmup
     # Note: Cannot use SequentialLR with ReduceLROnPlateau (requires metric in step())
     # Instead, manually handle warmup and plateau separately
-    warmup_epochs = CONFIG.get("warmup_epochs", 0)
-    scheduler_factor = CONFIG.get("scheduler_factor", 0.7)
-    scheduler_patience = CONFIG.get("scheduler_patience", 10)
-    scheduler_min_lr = CONFIG.get("scheduler_min_lr", 1e-6)
+    warmup_epochs = config.get("warmup_epochs", 0)
+    scheduler_factor = config.get("scheduler_factor", 0.7)
+    scheduler_patience = config.get("scheduler_patience", 10)
+    scheduler_min_lr = config.get("scheduler_min_lr", 1e-6)
     
     # Main scheduler (ReduceLROnPlateau)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -456,9 +501,9 @@ def main():
     
     # Store warmup info for manual handling
     use_warmup = (warmup_epochs > 0)
-    base_lr = CONFIG["lr"]  # Store base LR for warmup calculation
+    base_lr = config["lr"]  # Store base LR for warmup calculation
     # Training loop
-    output_dir = Path(CONFIG["output_dir"])
+    output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     
     train_losses = []
@@ -466,24 +511,33 @@ def main():
     best_val_loss = float('inf')
     patience_counter = 0
     
+    # Time tracking for estimation
+    epoch_times = []  # Store time per epoch
+    start_time = time.time()
+    estimation_start_epoch = 3  # Start estimating after 3 epochs
+    
     print("\n" + "="*60)
     print("TRAINING CONFIGURATION")
     print("="*60)
     print(f"Device: {device}")
     print(f"Prefix length: {prefix_length}s")
-    print(f"Batch size: {CONFIG['batch_size']}")
-    print(f"Learning rate: {CONFIG['lr']}")
-    print(f"Early stopping patience: {CONFIG['early_stopping_patience']}")
+    print(f"Batch size: {config['batch_size']}")
+    print(f"Learning rate: {config['lr']}")
+    print(f"Early stopping patience: {config['early_stopping_patience']}")
+    print(f"Total epochs: {config['epochs']}")
+    print(f"Weighted pooling: {config.get('use_weighted_pooling', False)}")
+    print(f"Variance regularization: {config.get('use_variance_regularization', False)}")
     print("="*60)
     print("\nStarting training...")
     
-    epoch_pbar = tqdm(range(CONFIG["epochs"]), desc="Training Progress", unit="epoch", ncols=120)
+    epoch_pbar = tqdm(range(config["epochs"]), desc="Training Progress", unit="epoch", ncols=120)
     
     for epoch in epoch_pbar:
+        epoch_start_time = time.time()
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device, 
-                                CONFIG["use_uncertainty"], epoch=epoch, total_epochs=CONFIG["epochs"])
+                                config["use_uncertainty"], epoch=epoch, total_epochs=config["epochs"], config=config)
         val_loss = validate(model, val_loader, criterion, device, 
-                           CONFIG["use_uncertainty"], epoch=epoch, total_epochs=CONFIG["epochs"])
+                           config["use_uncertainty"], epoch=epoch, total_epochs=config["epochs"], config=config)
         
         train_losses.append(train_loss)
         val_losses.append(val_loss)
@@ -510,13 +564,42 @@ def main():
             else:
                 epoch_pbar.write(f"  → Learning rate reduced: {old_lr:.2e} → {new_lr:.2e}")
         
+        # Track epoch time
+        epoch_time = time.time() - epoch_start_time
+        epoch_times.append(epoch_time)
+        elapsed_time = time.time() - start_time
+        elapsed_str = str(timedelta(seconds=int(elapsed_time)))
+        
+        # Calculate time estimation (worst-case: all epochs, ignoring early stopping)
+        if epoch >= estimation_start_epoch:
+            # Use recent epochs for more accurate estimation (last 5 epochs)
+            recent_epochs = min(5, len(epoch_times))
+            avg_epoch_time = np.mean(epoch_times[-recent_epochs:])
+            remaining_epochs = config["epochs"] - (epoch + 1)
+            estimated_remaining = avg_epoch_time * remaining_epochs
+            estimated_total = avg_epoch_time * config["epochs"]
+            
+            # Format time strings
+            remaining_str = str(timedelta(seconds=int(estimated_remaining)))
+            total_str = str(timedelta(seconds=int(estimated_total)))
+            
+            # Update progress bar description with time estimate
+            desc = f"Training [Epoch {epoch+1}/{config['epochs']}] | Remaining: {remaining_str} | Total: {total_str}"
+        else:
+            # Before estimation starts, just show elapsed time
+            desc = f"Training [Epoch {epoch+1}/{config['epochs']}] | Calculating estimate..."
+            remaining_str = "calculating..."
+            total_str = "calculating..."
+        
         best_val_str = f'{best_val_loss:.6f}' if best_val_loss != float('inf') else 'N/A'
+        epoch_pbar.set_description(desc)
         epoch_pbar.set_postfix({
             'train_loss': f'{train_loss:.6f}',
             'val_loss': f'{val_loss:.6f}',
             'lr': f'{optimizer.param_groups[0]["lr"]:.2e}',
             'best_val': best_val_str,
-            'patience': f'{patience_counter}/{CONFIG["early_stopping_patience"]}'
+            'patience': f'{patience_counter}/{config["early_stopping_patience"]}',
+            'elapsed': elapsed_str
         })
         
         # Save best model
@@ -529,7 +612,7 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': val_loss,
-                'config': CONFIG,
+                'config': config,
                 'normalization_stats': normalization_stats,
                 'metadata': metadata,
                 'prefix_length': prefix_length,
@@ -537,7 +620,7 @@ def main():
             epoch_pbar.write(f"  → Saved best model (val_loss={val_loss:.6f})")
         else:
             patience_counter += 1
-            if patience_counter >= CONFIG["early_stopping_patience"]:
+            if patience_counter >= config["early_stopping_patience"]:
                 epoch_pbar.write(f"\nEarly stopping triggered!")
                 break
     
@@ -546,11 +629,11 @@ def main():
     # Save final model
     normalization_stats = train_dataset.get_normalization_stats()
     torch.save({
-        'epoch': CONFIG["epochs"],
+        'epoch': config["epochs"],
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'val_loss': val_loss,
-        'config': CONFIG,
+        'config': config,
         'normalization_stats': normalization_stats,
         'metadata': metadata,
         'prefix_length': prefix_length,

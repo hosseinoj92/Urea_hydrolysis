@@ -36,7 +36,7 @@ CONFIG = {
 
     # Prefix extraction (multiple prefix lengths for training)
     "prefix_lengths": [30.0, 60.0, 120.0],  # Prefix lengths in seconds [s]
-    "prefix_n_points": 300,        # Base number of points to extract from each prefix (uniform sampling)
+    "prefix_n_points": 100,        # Base number of points to extract from each prefix (uniform sampling)
     # Note: For longer prefixes, consider using adaptive_n_points=True to maintain temporal resolution
     "use_adaptive_n_points": True,  # If True, scales n_points with prefix_length to maintain dt
     "target_dt": 0.3,  # Target temporal resolution [s] when using adaptive_n_points
@@ -89,7 +89,7 @@ CONFIG = {
             "tau_smoothing": (0.0, 5.0),  # Instrument smoothing [s]
             # Gas exchange
             "gas_exchange_k": (0.0, 1e-5),  # Exchange rate [1/s]
-            "gas_exchange_C_eq": (0.0, 1e-4),  # Equilibrium C [M]
+            "gas_exchange_C_eq": (0.0, 5e-5),  # Equilibrium C [M]
             # Mixing/dispersion
             "mixing_ramp_time_s": (0.0, 20.0),  # Mixing ramp time [s]
         },

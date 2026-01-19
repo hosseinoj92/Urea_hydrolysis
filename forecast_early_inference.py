@@ -38,6 +38,7 @@ def load_early_inference_model(model_path: Path, device: torch.device):
         mlp_hidden_dims=config.get('mlp_hidden_dims', [128, 64]),
         output_dropout=config.get('output_dropout', 0.1),
         use_uncertainty=config.get('use_uncertainty', True),
+        use_weighted_pooling=config.get('use_weighted_pooling', False),  # Support optional weighted pooling
     ).to(device)
     
     model.load_state_dict(checkpoint['model_state_dict'])
