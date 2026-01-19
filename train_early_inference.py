@@ -2,6 +2,10 @@
 Train early inference model for parameter estimation from pH prefix sequences.
 """
 
+# Set matplotlib backend before importing pyplot to avoid tkinter threading issues
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -21,14 +25,14 @@ from early_inference_model import create_early_inference_model, gaussian_nll_los
 # ╚══════════════════════════════════════════════════════════════╝
 CONFIG = {
     # Data paths
-    "data_dir": r"C:\Users\vt4ho\Simulations\simulation_data\generated_data\imperfect\version_2\Generated_Data_EarlyInference_100000",
-    "output_dir": r"C:\Users\vt4ho\Simulations\simulation_data\models\imperfect\version_2\models_early_inference_100000_30s",
+    "data_dir": r"C:\Users\vt4ho\Simulations\simulation_data\generated_data\imperfect\version_experimnent\Generated_Data_EarlyInference_50000",
+    "output_dir": r"C:\Users\vt4ho\Simulations\simulation_data\models\imperfect\version_experiment\models_early_inference_50000_30s",
     "prefix_length": 30.0,  # Which prefix length to train on (10, 30, or 60 seconds)
     
     # Training hyperparameters
     "batch_size": 512,  # Increased for better GPU utilization and stability
     "epochs": 1000,
-    "lr": 5e-3,  # Increased and scaled with batch size (2x batch = 2x LR)
+    "lr": 2e-3,  # Increased and scaled with batch size (2x batch = 2x LR)
     "val_split": 0.2,
     "early_stopping_patience": 100,
     "weight_decay": 1e-5,  # L2 regularization
@@ -51,7 +55,7 @@ CONFIG = {
     
     # Optional model features
     "use_weighted_pooling": False,  # If True, use learnable attention-based pooling
-    "use_variance_regularization": False,  # If True, add variance penalty to loss
+    "use_variance_regularization": True,  # If True, add variance penalty to loss
     "variance_penalty_weight": 0.01,  # Weight for variance regularization
     "target_variance": 0.1,  # Target variance for regularization
     
@@ -374,8 +378,8 @@ def main(config=None):
     print(f"Infer params: {metadata['infer_params']}")
     
     # A3: Verify parameter ordering
-    assert list(metadata['infer_params']) == ['E0_g_per_L', 'k_d'], \
-        f"Param order mismatch! Expected ['E0_g_per_L', 'k_d'], got {metadata['infer_params']}"
+    assert list(metadata['infer_params']) == ['powder_activity_frac', 'k_d'], \
+        f"Param order mismatch! Expected ['powder_activity_frac', 'k_d'], got {metadata['infer_params']}"
     
     # I1: Add shape assertions
     assert pH_prefix.shape[0] == t_prefix.shape[0] == known_inputs.shape[0] == target_params.shape[0], \
@@ -385,8 +389,8 @@ def main(config=None):
     assert target_params.shape[1] == 2, f"Expected 2 target params, got {target_params.shape[1]}"
     
     # I2: Add range checks for target parameters
-    assert np.all(target_params[:, 0] >= 0.01), f"E0_g_per_L too small: min={target_params[:, 0].min():.6f}"
-    assert np.all(target_params[:, 0] <= 2.0), f"E0_g_per_L too large: max={target_params[:, 0].max():.6f}"
+    assert np.all(target_params[:, 0] >= 0.0), f"powder_activity_frac too small: min={target_params[:, 0].min():.6f}"
+    assert np.all(target_params[:, 0] <= 1.0), f"powder_activity_frac too large: max={target_params[:, 0].max():.6f}"
     assert np.all(target_params[:, 1] >= 0), f"k_d negative: min={target_params[:, 1].min():.6f}"
     assert np.all(target_params[:, 1] <= 0.01), f"k_d too large: max={target_params[:, 1].max():.6f}"
     

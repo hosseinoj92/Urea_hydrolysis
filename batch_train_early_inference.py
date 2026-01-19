@@ -30,7 +30,7 @@ TRAINING_CONFIGS = {
     
     # Training hyperparameters variations
     "batch_sizes": [512],
-    "learning_rates": [2e-3, 5e-3],
+    "learning_rates": [2e-3],
     "epochs": [1000],
     "early_stopping_patience": [20],
     "warmup_epochs": [0, 5],  # Test with/without warmup

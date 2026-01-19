@@ -1,8 +1,12 @@
 """
 Evaluate early inference model and compare with mechanistic parameter fitting.
 
-Unified parameterization: E0_g_per_L + k_d only (no activity_scale, powder_activity_frac, tau_probe, pH_offset).
+Parameterization: powder_activity_frac + k_d (computes E0_g_per_L from powder_activity_frac).
 """
+
+# Set matplotlib backend before importing pyplot to avoid tkinter threading issues
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend
 
 import torch
 import numpy as np
@@ -35,9 +39,9 @@ CONFIG = {
     "device": "auto",
     "seed": 12345,                       # Deterministic seed for test set
     
-    # Parameter fitting bounds (unified: E0_g_per_L and k_d only)
+    # Parameter fitting bounds (powder_activity_frac and k_d)
     "fit_bounds": {
-        "E0_g_per_L": (5e-2, 1.25),  # Wide range covering slow to fast regimes [g/L]
+        "powder_activity_frac": (0.01, 1.0),  # Fraction of powder that is active enzyme [0-1]
         "k_d": (1e-5, 5e-3),
     },
     
@@ -140,7 +144,7 @@ def evaluate_single_case(
     """
     Evaluate a single test case and write per-sample CSV.
     
-    Unified parameterization: E0_g_per_L + k_d only.
+    Parameterization: powder_activity_frac + k_d (computes E0_g_per_L from powder_activity_frac).
     
     Parameters
     ----------
@@ -200,10 +204,10 @@ def evaluate_single_case(
     # C2: Verify denormalization produces physical units
     params_denorm = denormalize_outputs(params_norm, normalization_stats)
     assert not np.any(np.isnan(params_denorm)), "Params contain NaN after denormalization"
-    # Verify params are in physical units (E0: 0.05-1.25, k_d: 1e-5 to 5e-3)
+    # Verify params are in physical units (powder_activity_frac: 0-1, k_d: 1e-5 to 5e-3)
     # Allow some margin for clipping that happens later
-    if not (0.001 < params_denorm[0] < 2.0):
-        print(f"WARNING: E0 out of expected range: {params_denorm[0]:.6f}")
+    if not (0.0 <= params_denorm[0] <= 1.0):
+        print(f"WARNING: powder_activity_frac out of expected range: {params_denorm[0]:.6f}")
     if not (0.0 <= params_denorm[1] < 0.01):
         print(f"WARNING: k_d out of expected range: {params_denorm[1]:.6f}")
     
@@ -211,18 +215,15 @@ def evaluate_single_case(
                  zip(metadata['infer_params'], params_denorm)}
     
     # Clamp ML predictions to valid bounds (prevents invalid negative/extreme values)
-    ml_params['E0_g_per_L'] = float(np.clip(ml_params.get('E0_g_per_L', 0.5), 5e-4, 1.25))
+    ml_params['powder_activity_frac'] = float(np.clip(ml_params.get('powder_activity_frac', 0.1), 0.0, 1.0))
     ml_params['k_d'] = float(np.clip(ml_params.get('k_d', 0.0), 0.0, 5e-3))
     
-    # Compute derived powder_activity_frac for ML (for reporting only, not used in simulation)
-    ml_E0 = ml_params.get('E0_g_per_L', np.nan)
-    if not np.isnan(ml_E0) and ml_E0 > 0:
-        ml_powder_activity_frac_derived = float(np.clip(
-            ml_E0 * known_inputs['volume_L'] / known_inputs['grams_urease_powder'],
-            0.0, 1.0
-        ))
+    # Compute E0_g_per_L from powder_activity_frac
+    ml_powder_frac = ml_params.get('powder_activity_frac', np.nan)
+    if not np.isnan(ml_powder_frac):
+        ml_E0_g_per_L = ml_powder_frac * known_inputs['grams_urease_powder'] / known_inputs['volume_L']
     else:
-        ml_powder_activity_frac_derived = np.nan
+        ml_E0_g_per_L = np.nan
     
     # Part C: Mechanistic parameter fitting (uses same uniformly resampled prefix as ML)
     # If nuisance parameters are available and fitting is enabled, include them
@@ -248,15 +249,12 @@ def evaluate_single_case(
         print(f"Warning: Fitting failed for sample {sample_id}: {e}")
         fit_params = {k: np.nan for k in CONFIG["fit_bounds"].keys()}
     
-    # Compute derived powder_activity_frac for Fit (for reporting only)
-    fit_E0 = fit_params.get('E0_g_per_L', np.nan)
-    if not np.isnan(fit_E0) and fit_E0 > 0:
-        fit_powder_activity_frac_derived = float(np.clip(
-            fit_E0 * known_inputs['volume_L'] / known_inputs['grams_urease_powder'],
-            0.0, 1.0
-        ))
+    # Compute E0_g_per_L from fit powder_activity_frac
+    fit_powder_frac = fit_params.get('powder_activity_frac', np.nan)
+    if not np.isnan(fit_powder_frac):
+        fit_E0_g_per_L = fit_powder_frac * known_inputs['grams_urease_powder'] / known_inputs['volume_L']
     else:
-        fit_powder_activity_frac_derived = np.nan
+        fit_E0_g_per_L = np.nan
     
     # Build simulator (unified: use E_eff0 directly, no powder_activity_frac)
     S0 = known_inputs['substrate_mM'] / 1000.0
@@ -277,10 +275,10 @@ def evaluate_single_case(
     t_ref = np.arange(0.0, t_max + reference_grid_dt/2, reference_grid_dt)
     t_ref[-1] = t_max  # Ensure t_max is exactly included
     
-    # Part C: ML forecast (full trajectory on reference grid) - use E_eff0 directly
+    # Part C: ML forecast (full trajectory on reference grid) - compute E_eff0 from powder_activity_frac
     # For fair comparison, use same nuisance params as ground truth (ML doesn't predict these)
     sim_params_ml = {
-        'E_eff0': ml_params.get('E0_g_per_L', 0.5),  # Direct enzyme loading [g/L]
+        'E_eff0': ml_E0_g_per_L if not np.isnan(ml_E0_g_per_L) else 0.5,  # Computed from powder_activity_frac
         'k_d': ml_params.get('k_d', 0.0),
         't_shift': 0.0,
         'tau_probe': 0.0,  # Not used (true pH space)
@@ -305,10 +303,10 @@ def evaluate_single_case(
         enable_mixing_ramp=enable_mix,
     )
     
-    # Part C: Fit forecast (full trajectory on reference grid) - use E_eff0 directly
+    # Part C: Fit forecast (full trajectory on reference grid) - compute E_eff0 from powder_activity_frac
     # Use fitted nuisance params if available, otherwise use ground truth nuisance params
     sim_params_fit = {
-        'E_eff0': fit_params.get('E0_g_per_L', 0.5),  # Direct enzyme loading [g/L]
+        'E_eff0': fit_E0_g_per_L if not np.isnan(fit_E0_g_per_L) else 0.5,  # Computed from powder_activity_frac
         'k_d': fit_params.get('k_d', 0.0),
         't_shift': 0.0,
         'tau_probe': 0.0,  # Not used (true pH space)
@@ -378,13 +376,20 @@ def evaluate_single_case(
     ax.grid(True, alpha=0.3)
     ax.set_xlim(0, plot_max_t)
     
+    # Compute true E0_g_per_L from powder_activity_frac
+    true_powder_frac = true_params.get('powder_activity_frac', np.nan)
+    if not np.isnan(true_powder_frac):
+        true_E0_g_per_L = true_powder_frac * known_inputs['grams_urease_powder'] / known_inputs['volume_L']
+    else:
+        true_E0_g_per_L = np.nan
+    
     # Add parameter info as text
-    param_text = (f"True: E0={true_params.get('E0_g_per_L', np.nan):.4f} g/L, "
-                  f"k_d={true_params.get('k_d', np.nan):.6f} 1/s\n"
-                  f"ML: E0={ml_params.get('E0_g_per_L', np.nan):.4f} g/L, "
-                  f"k_d={ml_params.get('k_d', np.nan):.6f} 1/s\n"
-                  f"Fit: E0={fit_params.get('E0_g_per_L', np.nan):.4f} g/L, "
-                  f"k_d={fit_params.get('k_d', np.nan):.6f} 1/s")
+    param_text = (f"True: frac={true_params.get('powder_activity_frac', np.nan):.3f}, "
+                  f"E0={true_E0_g_per_L:.4f} g/L, k_d={true_params.get('k_d', np.nan):.6f} 1/s\n"
+                  f"ML: frac={ml_params.get('powder_activity_frac', np.nan):.3f}, "
+                  f"E0={ml_E0_g_per_L:.4f} g/L, k_d={ml_params.get('k_d', np.nan):.6f} 1/s\n"
+                  f"Fit: frac={fit_params.get('powder_activity_frac', np.nan):.3f}, "
+                  f"E0={fit_E0_g_per_L:.4f} g/L, k_d={fit_params.get('k_d', np.nan):.6f} 1/s")
     ax.text(0.02, 0.98, param_text, transform=ax.transAxes, fontsize=9,
             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
@@ -467,34 +472,25 @@ def evaluate_single_case(
                 "1" if is_prefix else "0",
             ])
     
-    # Compute ground truth derived powder_activity_frac from true E0_g_per_L
-    true_E0 = true_params.get('E0_g_per_L', np.nan)
-    true_powder_activity_frac_derived = np.nan
-    if not np.isnan(true_E0):
-        true_powder_activity_frac_derived = float(np.clip(
-            true_E0 * known_inputs['volume_L'] / known_inputs['grams_urease_powder'],
-            0.0, 1.0
-        ))
-    
     # Return summary for aggregate CSV
     summary = {
         'sample_id': sample_id,
-        # Inferred parameters (unified: E0_g_per_L and k_d only)
-        'ml_E0_g_per_L': ml_params.get('E0_g_per_L', np.nan),
+        # Inferred parameters (powder_activity_frac and k_d)
+        'ml_powder_activity_frac': ml_params.get('powder_activity_frac', np.nan),
         'ml_k_d': ml_params.get('k_d', np.nan),
-        'fit_E0_g_per_L': fit_params.get('E0_g_per_L', np.nan),
+        'fit_powder_activity_frac': fit_params.get('powder_activity_frac', np.nan),
         'fit_k_d': fit_params.get('k_d', np.nan),
-        'true_E0_g_per_L': true_params.get('E0_g_per_L', np.nan),
+        'true_powder_activity_frac': true_params.get('powder_activity_frac', np.nan),
         'true_k_d': true_params.get('k_d', np.nan),
-        # Parameter errors
-        'ml_E0_g_per_L_mae': param_metrics_ml.get('E0_g_per_L', {}).get('MAE', np.nan),
+        # Computed E0_g_per_L (for interpretability)
+        'ml_E0_g_per_L': ml_E0_g_per_L,
+        'fit_E0_g_per_L': fit_E0_g_per_L,
+        'true_E0_g_per_L': true_E0_g_per_L,
+        # Parameter errors (on powder_activity_frac)
+        'ml_powder_activity_frac_mae': param_metrics_ml.get('powder_activity_frac', {}).get('MAE', np.nan),
         'ml_k_d_mae': param_metrics_ml.get('k_d', {}).get('MAE', np.nan),
-        'fit_E0_g_per_L_mae': param_metrics_fit.get('E0_g_per_L', {}).get('MAE', np.nan),
+        'fit_powder_activity_frac_mae': param_metrics_fit.get('powder_activity_frac', {}).get('MAE', np.nan),
         'fit_k_d_mae': param_metrics_fit.get('k_d', {}).get('MAE', np.nan),
-        # Derived powder_activity_frac (for interpretability, not used in inference)
-        'ml_powder_activity_frac_derived': ml_powder_activity_frac_derived,
-        'fit_powder_activity_frac_derived': fit_powder_activity_frac_derived,
-        'true_powder_activity_frac_derived': true_powder_activity_frac_derived,
         # Trajectory metrics
         'ml_rmse': trajectory_metrics.get('RMSE', np.nan),
         'ml_mae': trajectory_metrics.get('MAE', np.nan),
@@ -654,7 +650,7 @@ def main():
     
     # Compute aggregate statistics
     print("\n" + "="*60)
-    print("AGGREGATE METRICS (Unified: E0_g_per_L + k_d)")
+    print("AGGREGATE METRICS (powder_activity_frac + k_d)")
     print("="*60)
     
     # Parameter metrics
@@ -689,7 +685,7 @@ def main():
         'reference_grid_dt': CONFIG.get("reference_grid_dt", 5.0),
         'n_test_samples': len(all_summaries),
         'seed': seed,
-        'parameterization': 'unified_E0_g_per_L_k_d',
+        'parameterization': 'powder_activity_frac_k_d',
         'parameter_metrics': {
             param: {
                 'ML_MAE_mean': float(df_summary[f'ml_{param}_mae'].mean()),

@@ -48,9 +48,9 @@ CONFIG = {
     "device": "auto",
     "seed": 12345,                       # Deterministic seed for test set
     
-    # Parameter fitting bounds (unified: E0_g_per_L and k_d only)
+    # Parameter fitting bounds (powder_activity_frac and k_d)
     "fit_bounds": {
-        "E0_g_per_L": (5e-2, 1.25),  # Wide range covering slow to fast regimes [g/L]
+        "powder_activity_frac": (0.01, 1.0),  # Fraction of powder that is active enzyme [0-1]
         "k_d": (1e-5, 5e-3),
     },
     
@@ -292,7 +292,7 @@ def evaluate_model(
         'reference_grid_dt': config.get("reference_grid_dt", 5.0),
         'n_test_samples': len(all_summaries),
         'seed': config['seed'],
-        'parameterization': 'unified_E0_g_per_L_k_d',
+        'parameterization': 'powder_activity_frac_k_d',
         'parameter_metrics': {
             param: {
                 'ML_MAE_mean': float(df_summary[f'ml_{param}_mae'].mean()),

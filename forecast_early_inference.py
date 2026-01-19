@@ -20,8 +20,8 @@ def load_early_inference_model(model_path: Path, device: torch.device):
     normalization_stats = checkpoint.get('normalization_stats', {})
     prefix_length = checkpoint.get('prefix_length', 30.0)
     
-    # Reconstruct model (unified: E0_g_per_L and k_d only)
-    infer_params = metadata.get('infer_params', ['E0_g_per_L', 'k_d'])
+    # Reconstruct model (powder_activity_frac and k_d)
+    infer_params = metadata.get('infer_params', ['powder_activity_frac', 'k_d'])
     n_output_params = len(infer_params)
     n_known_inputs = len(metadata.get('known_input_names', []))
     
@@ -151,8 +151,8 @@ def forecast_ph(
     
     # Load model
     model, metadata, normalization_stats, prefix_length = load_early_inference_model(model_path, device)
-    infer_params = metadata.get('infer_params', ['E0_g_per_L', 'k_d'])
-    # Unified: exactly 5 known inputs (no powder_activity_frac)
+    infer_params = metadata.get('infer_params', ['powder_activity_frac', 'k_d'])
+    # Exactly 5 known inputs
     known_input_names = metadata.get('known_input_names', [
         'substrate_mM', 'grams_urease_powder', 'temperature_C',
         'initial_pH', 'volume_L'
@@ -180,8 +180,12 @@ def forecast_ph(
     # Denormalize parameters
     params = denormalize_outputs(params_norm, normalization_stats)
     
-    # Create parameter dict (unified: E0_g_per_L and k_d only)
+    # Create parameter dict (powder_activity_frac and k_d)
     estimated_params = {name: float(val) for name, val in zip(infer_params, params)}
+    
+    # Compute E0_g_per_L from powder_activity_frac
+    powder_activity_frac = estimated_params.get('powder_activity_frac', 0.1)
+    E0_g_per_L = powder_activity_frac * known_inputs['grams_urease_powder'] / known_inputs['volume_L']
     
     # Build simulator (dummy base loading, will be overridden by E_eff0)
     S0 = known_inputs['substrate_mM'] / 1000.0  # mM → M
@@ -198,9 +202,9 @@ def forecast_ph(
         use_T_dependent_pH_activity=True,
     )
     
-    # Parameters for ODE solver (unified: use E_eff0 directly)
+    # Parameters for ODE solver (compute E_eff0 from powder_activity_frac)
     sim_params = {
-        'E_eff0': estimated_params.get('E0_g_per_L', 0.5),  # Direct enzyme loading [g/L]
+        'E_eff0': E0_g_per_L,  # Computed from powder_activity_frac
         'k_d': estimated_params.get('k_d', 0.0),
         't_shift': 0.0,
         'tau_probe': 0.0,  # Not used (true pH space)
